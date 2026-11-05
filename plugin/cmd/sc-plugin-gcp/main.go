@@ -71,15 +71,15 @@ import (
 	scpluginv1 "github.com/simple-container-com/api/pkg/plugin/proto/v1"
 	"github.com/simple-container-com/api/pkg/plugin/runtime"
 
-	echoApi "github.com/simple-container-com/sc-plugin-gcp/api"
+	gcpApi "github.com/simple-container-com/sc-plugin-gcp/api"
 	echoInternal "github.com/simple-container-com/sc-plugin-gcp/plugin/internal"
 )
 
-// echoPlugin is the gRPC server impl. Fields follow the same shape every
+// gcpPlugin is the gRPC server impl. Fields follow the same shape every
 // real plugin uses: a mutex, cached registrar/handler state carried
 // between RPCs within one deploy, and a progress Publisher drained by
 // LogStream.
-type echoPlugin struct {
+type gcpPlugin struct {
 	scpluginv1.UnimplementedSCCloudPluginServer
 
 	mu        sync.Mutex
@@ -106,7 +106,7 @@ type echoPlugin struct {
 // scCloudPlugin.GRPCServer type-asserts the Impl against this interface
 // and calls SetBroker when it exists; without it, scPlugin.NewPeerClient
 // returns "nil broker" and PeerInvoke never dials.
-func (p *echoPlugin) SetBroker(b *hplugin.GRPCBroker) { p.broker = b }
+func (p *gcpPlugin) SetBroker(b *hplugin.GRPCBroker) { p.broker = b }
 
 // Schema is the first RPC SC core calls. The response advertises every
 // token this plugin owns, both at config-parse time (so core routes
@@ -117,13 +117,20 @@ func (p *echoPlugin) SetBroker(b *hplugin.GRPCBroker) { p.broker = b }
 // must agree. init.go's reflection test catches gaps in the OwnedTypes
 // half; a Schema() that omits a type is caught at the next conformance
 // run.
-func (p *echoPlugin) Schema(_ context.Context, _ *scpluginv1.SchemaRequest) (*scpluginv1.SchemaResponse, error) {
+func (p *gcpPlugin) Schema(_ context.Context, _ *scpluginv1.SchemaRequest) (*scpluginv1.SchemaResponse, error) {
 	return &scpluginv1.SchemaResponse{
-		PluginVersion:         "gcp-0.0.1",
-		ProviderTypes:         []string{echoApi.ProviderType},
-		RegistrarTypes:        []string{echoApi.RegistrarTypeEchoDns},
-		ResourceTypes:         []string{echoApi.ResourceTypeEchoBucket},
-		ComputeProcessorTypes: []string{echoApi.ResourceTypeEchoBucket},
+		PluginVersion: "gcp-0.0.1",
+		ProviderTypes: []string{gcpApi.ProviderType},
+		// Walking-skeleton phase 1: only gcp-bucket is lifted today. The
+		// other resources (gcp-pubsub, gcp-redis, gcp-cloudsql-postgres,
+		// gcp-gke-autopilot-cluster, gcp-docker-image-push) and templates
+		// (cloudrun, gcp-static-website, gcp-gke-autopilot) land in
+		// subsequent commits. No DNS registrar (GCP has none in-tree).
+		// No VM driver (GCP has none).
+		ResourceTypes:         []string{gcpApi.ResourceTypeBucket},
+		ComputeProcessorTypes: []string{gcpApi.ResourceTypeBucket},
+		StateStoreTypes:       []string{gcpApi.StateStorageTypeGcpBucket},
+		SecretsProviderTypes:  []string{gcpApi.SecretsProviderTypeGcpKms},
 		PulumiPlugins:         []*scpluginv1.PulumiPluginRequirement{
 			// Empty for gcp — a real cloud lists the Pulumi provider
 			// plugin names it imports: `{Package: "cloudflare", Version:
@@ -132,29 +139,19 @@ func (p *echoPlugin) Schema(_ context.Context, _ *scpluginv1.SchemaRequest) (*sc
 			// `pulumi up` finds them. See
 			// github.com/pulumi/pulumi-<name>/sdk for versions.
 		},
-		VmDrivers: []*scpluginv1.VmDriverSpec{
-			// A real VM-driving plugin echoes vm.Drivers[DRIVER].ToProto()
-			// so core's capability table and the plugin's agree by reading
-			// the same source. The gcp driver advertises an in-template
-			// stub so the URN contract test can exercise VmDriverSpec
-			// round-tripping.
-			echoVmDriverSpec(),
-		},
+		// VmDrivers: GCP has no VM driver today. Omit until/if a
+		// `gcp-vm` driver is scoped.
 	}, nil
 }
 
-// echoVmDriverSpec returns the VmDriverSpec for the gcp-vm driver. In a
-// real plugin this would be `vm.Drivers[vm.Driver<Cloud>].ToProto(name)`
-// where the Drivers map entry lives in-tree (the capability facts a
-// driver reports — see pkg/clouds/vm/capabilities.go for the shape).
-//
-// Gcp doesn't have an in-tree capabilities entry, so this stub builds
-// one by hand. An author replaces this with the ToProto call.
-func echoVmDriverSpec() *scpluginv1.VmDriverSpec {
+// gcpVmDriverSpec is kept as reference for future gcp-vm work but is
+// currently unreferenced — GCP has no VM driver. Delete this entire
+// function when a real gcp-vm lands via vm.Drivers[vm.DriverGcpVm].
+func gcpVmDriverSpec() *scpluginv1.VmDriverSpec {
 	return &scpluginv1.VmDriverSpec{
-		Driver:      echoApi.DriverEchoVm,
-		Implemented: true,
-		Unverified:  "gcp driver is a template stub — it does not actually create any VM. Replace with a real cloud's driver.",
+		Driver:      "gcp-vm",
+		Implemented: false,
+		Unverified:  "GCP has no VM driver in the plugin walking-skeleton phase.",
 		RoadmapItem: "docs/roadmap/items/sc-plugin-architecture.md",
 		Capabilities: &scpluginv1.VmCapabilities{
 			CloudInit:      false,
@@ -174,7 +171,7 @@ func echoVmDriverSpec() *scpluginv1.VmDriverSpec {
 // 7). WithLocalEngineFallback is what keeps a background ctx.Log.Warn
 // (e.g. from pulumi-aws's provider) from panicking when the header
 // carries no engine address (Addendum P).
-func (p *echoPlugin) ProvisionRegistrar(stdctx context.Context, req *scpluginv1.ProvisionRegistrarRequest) (resp *scpluginv1.ProvisionRegistrarResponse, err error) {
+func (p *gcpPlugin) ProvisionRegistrar(stdctx context.Context, req *scpluginv1.ProvisionRegistrarRequest) (resp *scpluginv1.ProvisionRegistrarResponse, err error) {
 	// A real registrar reads the deploying stack's `baseDnsZone` from
 	// req.GetBaseDnsZone() for its zone lookup — NOT its own configured
 	// zoneName, which is only a default. Getting this wrong is how a
@@ -208,7 +205,7 @@ func (p *echoPlugin) ProvisionRegistrar(stdctx context.Context, req *scpluginv1.
 // the scCoreRegistrarBridge pattern below instead of calling the local
 // registrar — see that stub for the ctx.Export-as-forcing-function
 // pattern (trap 15).
-func (p *echoPlugin) NewDnsRecord(stdctx context.Context, req *scpluginv1.NewDnsRecordRequest) (resp *scpluginv1.NewDnsRecordResponse, err error) {
+func (p *gcpPlugin) NewDnsRecord(stdctx context.Context, req *scpluginv1.NewDnsRecordRequest) (resp *scpluginv1.NewDnsRecordResponse, err error) {
 	rctx, err := runtime.NewContext(stdctx, req.GetHeader(), runtime.WithLocalEngineFallback(p.progress))
 	if err != nil {
 		return nil, err
@@ -248,7 +245,7 @@ func (p *echoPlugin) NewDnsRecord(stdctx context.Context, req *scpluginv1.NewDns
 // (trap 10). Lose the Secret flag inside HarvestExports and secret
 // outputs land plaintext in the parent stack root (trap 11 — the api
 // runtime handles that for you, do not route around it).
-func (p *echoPlugin) Provision(stdctx context.Context, req *scpluginv1.ProvisionRequest) (resp *scpluginv1.ProvisionResponse, err error) {
+func (p *gcpPlugin) Provision(stdctx context.Context, req *scpluginv1.ProvisionRequest) (resp *scpluginv1.ProvisionResponse, err error) {
 	rctx, err := runtime.NewContext(stdctx, req.GetHeader(), runtime.WithLocalEngineFallback(p.progress))
 	if err != nil {
 		return nil, err
@@ -315,7 +312,7 @@ func (p *echoPlugin) Provision(stdctx context.Context, req *scpluginv1.Provision
 // pkg/plugin/compute.go doc): sdk.Resource dependencies via
 // AddDependency, pre/post-processors. Those stay in-plugin and get
 // applied against the plugin's own sdk.Context before Build.
-func (p *echoPlugin) ComputeProcess(stdctx context.Context, req *scpluginv1.ComputeProcessRequest) (resp *scpluginv1.ComputeProcessResponse, err error) {
+func (p *gcpPlugin) ComputeProcess(stdctx context.Context, req *scpluginv1.ComputeProcessRequest) (resp *scpluginv1.ComputeProcessResponse, err error) {
 	rctx, err := runtime.NewContext(stdctx, req.GetHeader(), runtime.WithLocalEngineFallback(p.progress))
 	if err != nil {
 		return nil, err
@@ -375,7 +372,7 @@ func (p *echoPlugin) ComputeProcess(stdctx context.Context, req *scpluginv1.Comp
 // / depends_on_resources off the resulting typed Input, and returns.
 // The ONLY structural change on the plugin side is implementing this
 // RPC.
-func (p *echoPlugin) ConvertStackConfig(_ context.Context, req *scpluginv1.ConvertStackConfigRequest) (*scpluginv1.ConvertStackConfigResponse, error) {
+func (p *gcpPlugin) ConvertStackConfig(_ context.Context, req *scpluginv1.ConvertStackConfigRequest) (*scpluginv1.ConvertStackConfigResponse, error) {
 	p.progress.Info("convert-stack-config", fmt.Sprintf("template=%q stack=%q dir=%q", req.GetTemplateType(), req.GetStackName(), req.GetStackDir()))
 
 	// Minimal response that exercises every field a real plugin
@@ -396,7 +393,7 @@ func (p *echoPlugin) ConvertStackConfig(_ context.Context, req *scpluginv1.Conve
 	}, nil
 }
 
-func (p *echoPlugin) PreDestroy(ctx context.Context, req *scpluginv1.PreDestroyRequest) (*scpluginv1.PreDestroyResponse, error) {
+func (p *gcpPlugin) PreDestroy(ctx context.Context, req *scpluginv1.PreDestroyRequest) (*scpluginv1.PreDestroyResponse, error) {
 	if err := echoInternal.PreDestroy(ctx, p.progress, req); err != nil {
 		p.progress.Error("pre-destroy", err.Error())
 	}
@@ -412,7 +409,7 @@ func (p *echoPlugin) PreDestroy(ctx context.Context, req *scpluginv1.PreDestroyR
 // IP, deploy key), parses their outputs via plugin.OutputRefTo /
 // AddressOutput / PrivateKeyOf, and composes the VmHostBuilder chain.
 // See api/pkg/plugin/vmhosts.go for the builder surface.
-func (p *echoPlugin) VmHosts(stdctx context.Context, req *scpluginv1.VmHostsRequest) (resp *scpluginv1.VmHostsResponse, err error) {
+func (p *gcpPlugin) VmHosts(stdctx context.Context, req *scpluginv1.VmHostsRequest) (resp *scpluginv1.VmHostsResponse, err error) {
 	p.progress.Info("vm-hosts", fmt.Sprintf("provisioning gcp vm %q (driver=%s)", req.GetResourceName(), req.GetDriver()))
 
 	rctx, err := runtime.NewContext(stdctx, req.GetHeader(), runtime.WithLocalEngineFallback(p.progress))
@@ -433,7 +430,7 @@ func (p *echoPlugin) VmHosts(stdctx context.Context, req *scpluginv1.VmHostsRequ
 // LogStream drains the plugin's progress Publisher onto the gRPC stream.
 // SC core opens one of these per plugin after Schema() returns. Ends when
 // the stream context cancels (SC core teardown) or Serve stops accepting.
-func (p *echoPlugin) LogStream(_ *scpluginv1.LogStreamRequest, stream scpluginv1.SCCloudPlugin_LogStreamServer) error {
+func (p *gcpPlugin) LogStream(_ *scpluginv1.LogStreamRequest, stream scpluginv1.SCCloudPlugin_LogStreamServer) error {
 	ctx := stream.Context()
 	for {
 		batch, ok := p.progress.Drain()
@@ -498,7 +495,7 @@ type scCoreRegistrarBridge struct {
 	pluginName string
 }
 
-func (p *echoPlugin) newRegistrarBridge(stdctx context.Context, h *scpluginv1.RequestHeader, peerPluginName string) (*scCoreRegistrarBridge, error) {
+func (p *gcpPlugin) newRegistrarBridge(stdctx context.Context, h *scpluginv1.RequestHeader, peerPluginName string) (*scCoreRegistrarBridge, error) {
 	peer, err := scPlugin.NewPeerClient(stdctx, p.broker, h)
 	if err != nil {
 		return nil, errors.Wrap(err, "dial SCCore for peer bridge")
@@ -539,7 +536,7 @@ var _ = vm.ResourceTypeVm
 var _ = api.Credentials{}
 
 func main() {
-	impl := &echoPlugin{progress: scPlugin.NewPublisher(0)}
+	impl := &gcpPlugin{progress: scPlugin.NewPublisher(0)}
 	scPlugin.Serve(scPlugin.ServerConfig{
 		Impl: impl,
 		Logger: hclog.New(&hclog.LoggerOptions{

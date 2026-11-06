@@ -12,6 +12,7 @@ require (
 	github.com/samber/lo v1.53.0
 	github.com/simple-container-com/api v0.0.0-20261106174745-994111935a5d
 	github.com/simple-container-com/sc-plugin-gcp/api v0.0.0
+	golang.org/x/mod v0.41.0
 	gopkg.in/yaml.v3 v3.0.1
 )
 
@@ -136,7 +137,6 @@ require (
 	go.yaml.in/yaml/v3 v3.0.5 // indirect
 	golang.org/x/crypto v0.58.0 // indirect
 	golang.org/x/exp v0.0.0-20260410095643-746e56fc9e2f // indirect
-	golang.org/x/mod v0.41.0 // indirect
 	golang.org/x/net v0.62.0 // indirect
 	golang.org/x/sync v0.24.0 // indirect
 	golang.org/x/sys v0.49.0 // indirect

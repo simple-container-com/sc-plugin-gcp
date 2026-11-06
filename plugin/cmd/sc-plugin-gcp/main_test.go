@@ -5,7 +5,12 @@ package main
 
 import (
 	"context"
+	"os"
+	"path/filepath"
+	"strings"
 	"testing"
+
+	"golang.org/x/mod/modfile"
 
 	. "github.com/onsi/gomega"
 	"github.com/simple-container-com/api/pkg/api"
@@ -113,6 +118,14 @@ func TestSchema_OwnedTypesList_CoversAdvertisement(t *testing.T) {
 		advertised[t] = struct{}{}
 	}
 
+	// Guard against vacuous pass: a Schema with no advertisement at
+	// all would make the loop below run zero iterations and the test
+	// go green without proving anything. sc-ru-clouds session's
+	// 2026-11-06 mutation-check recommendation — "a Schema test that
+	// passes because the loop body never executes is easy to write."
+	Expect(advertised).ToNot(BeEmpty(),
+		"Schema advertises no tokens at all — this test would pass vacuously")
+
 	// OwnedTypes list lives on PluginRequirement, pulled from the
 	// RegisterPluginRequirement call that api/init.go made at Go-link
 	// time. api.LookupPluginRequirement looks up by TOKEN, not by
@@ -130,5 +143,73 @@ func TestSchema_OwnedTypesList_CoversAdvertisement(t *testing.T) {
 	for token := range advertised {
 		Expect(ownedSet).To(HaveKey(token),
 			"Schema advertises %q but api/init.go OwnedTypes doesn't list it — fool-protection auto-inject won't cover it", token)
+	}
+}
+
+// TestSchema_PulumiPluginsVersion_MatchesGoMod — guards a live defect
+// class sc-ru-clouds session surfaced 2026-11-06: a plugin that
+// advertises a `PulumiPlugins` version drifting from its own `go.mod`
+// has core *prefetch* one version while every resource the driver
+// registers asks for the version baked into the SDK it compiled
+// against — a two-version deploy. Live current instance:
+// `sc-plugin-cloudru` advertises `tls 5.3.0` in Schema while its
+// `plugin/go.mod` pins pulumi-tls at v5.5.0.
+//
+// Test parses the sibling `go.mod` with `golang.org/x/mod/modfile`,
+// maps each `pulumi-<package>` require to the advertised
+// `PulumiPluginRequirement{Package, Version}`, and fails naming both
+// versions on a mismatch. The upstream check belongs in the plugin
+// release workflow eventually; this test is the plugin-local half.
+func TestSchema_PulumiPluginsVersion_MatchesGoMod(t *testing.T) {
+	RegisterTestingT(t)
+
+	// Parse plugin/go.mod relative to this test's package. The test
+	// binary is run from `plugin/cmd/sc-plugin-gcp/`, so go.mod is
+	// two levels up.
+	goModPath := filepath.Join("..", "..", "go.mod")
+	raw, err := os.ReadFile(goModPath)
+	Expect(err).ToNot(HaveOccurred(), "read %s", goModPath)
+	parsed, err := modfile.Parse(goModPath, raw, nil)
+	Expect(err).ToNot(HaveOccurred())
+
+	// Map pulumi-<pkg>/sdk/... → version from go.mod requires.
+	modVersions := map[string]string{}
+	for _, r := range parsed.Require {
+		mp := r.Mod.Path
+		if !strings.HasPrefix(mp, "github.com/pulumi/pulumi-") {
+			continue
+		}
+		// pkg name is the segment between `pulumi-` and the next `/`.
+		rest := strings.TrimPrefix(mp, "github.com/pulumi/pulumi-")
+		pkg := rest
+		if idx := strings.Index(rest, "/"); idx >= 0 {
+			pkg = rest[:idx]
+		}
+		// Version from go.mod is `vX.Y.Z` — strip the `v` to match
+		// scpluginv1.PulumiPluginRequirement.Version shape.
+		modVersions[pkg] = strings.TrimPrefix(r.Mod.Version, "v")
+	}
+	Expect(modVersions).ToNot(BeEmpty(),
+		"go.mod has no pulumi-* requires — a Schema test asserting plugin versions is vacuous")
+
+	p := &gcpPlugin{}
+	resp, err := p.Schema(context.Background(), &scpluginv1.SchemaRequest{})
+	Expect(err).ToNot(HaveOccurred())
+
+	// Every advertised PulumiPlugin must have a matching go.mod version.
+	// A go.mod require NOT advertised in Schema is fine (an internal
+	// dep that no provider resource surfaces); the reverse is the bug.
+	pulumiPlugins := resp.GetPulumiPlugins()
+	Expect(pulumiPlugins).ToNot(BeEmpty(),
+		"Schema advertises no PulumiPlugins — this test passes vacuously")
+
+	for _, pp := range pulumiPlugins {
+		modVer, ok := modVersions[pp.GetPackage()]
+		Expect(ok).To(BeTrue(),
+			"Schema advertises pulumi-%s but go.mod has no github.com/pulumi/pulumi-%s require — core will download a Pulumi plugin the driver cannot talk to",
+			pp.GetPackage(), pp.GetPackage())
+		Expect(pp.GetVersion()).To(Equal(modVer),
+			"pulumi-%s drift: Schema advertises %s, go.mod pins %s — core prefetches one version while the driver's SDK demands the other (cloudru-tls shape, 2026-11-06)",
+			pp.GetPackage(), pp.GetVersion(), modVer)
 	}
 }

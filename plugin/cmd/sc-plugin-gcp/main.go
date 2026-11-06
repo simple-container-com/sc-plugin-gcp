@@ -145,20 +145,38 @@ func (p *gcpPlugin) Schema(_ context.Context, _ *scpluginv1.SchemaRequest) (*scp
 	}, nil
 }
 
-// gcpVmDriverSpec is kept as reference for future gcp-vm work but is
-// currently unreferenced — GCP has no VM driver. Delete this entire
-// function when a real gcp-vm lands via vm.Drivers[vm.DriverGcpVm].
+// gcpVmDriverSpec is a HAND-BUILT reference for future gcp-vm work.
+// Currently unreferenced — GCP has no VM driver and no `gcp-vm`
+// placeholder row in core's Drivers table (verified against api
+// pkg/clouds/vm/capabilities.go: table has 7 rows, none named gcp-*).
+//
+// IF gcp-vm is ever scoped, the shape below is the DESTINATION, not
+// the thing to delete. Post-#558 (api e8dcd103) the read-core idiom
+// `vm.Drivers[DRIVER].ToProto(DRIVER)` yields `Implemented: false` for
+// a placeholder row, which Validate refuses identically to advertising
+// nothing; a plugin owning a real driver must hand-build the spec.
+// See forge/docs/roadmap/items/sc-plugin-gcp-extraction.md "Future
+// gcp-vm notes" for the full inclusion rule — in particular: it is
+// safe (and a cheap operator-facing win) to ADD a `gcp-vm` placeholder
+// row in core; the trap is only FLIPPING an existing placeholder's
+// `Implemented: false → true` after the plugin registered.
+//
+// Capabilities below are PLACEHOLDERS, not measurements. Replace with
+// vendor-SDK-example-sourced values when the slice is scoped.
+// Per the sc-ru-clouds session's 2026-11-06 measurement against MWS:
+// "every vm.Capabilities field left at zero-for-unmeasured was guessed
+// wrong first by analogy." For GCP specifically: GCE has regions AND
+// zones (Regionless must be false), GCE images that run cloud-init
+// consume metadata `user-data` (CloudInit requires measurement — do
+// not guess).
 func gcpVmDriverSpec() *scpluginv1.VmDriverSpec {
 	return &scpluginv1.VmDriverSpec{
 		Driver:      "gcp-vm",
 		Implemented: false,
-		Unverified:  "GCP has no VM driver in the plugin walking-skeleton phase.",
-		RoadmapItem: "docs/roadmap/items/sc-plugin-architecture.md",
-		Capabilities: &scpluginv1.VmCapabilities{
-			CloudInit:      false,
-			Regionless:     true,
-			SecurityGroups: false,
-		},
+		Unverified:  "sc-plugin-gcp walking-skeleton — gcp-vm is not scoped. See forge/docs/roadmap/items/sc-plugin-gcp-extraction.md if you are picking this up.",
+		RoadmapItem: "forge/docs/roadmap/items/sc-plugin-gcp-extraction.md",
+		// Capabilities: nil — unmeasured. Leaving the block absent is
+		// loader than wrong values so the next author knows to measure.
 	}
 }
 

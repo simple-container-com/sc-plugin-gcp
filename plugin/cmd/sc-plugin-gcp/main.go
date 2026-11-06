@@ -59,6 +59,8 @@ import (
 	"os"
 	"sync"
 
+	"gopkg.in/yaml.v3"
+
 	hclog "github.com/hashicorp/go-hclog"
 	hplugin "github.com/hashicorp/go-plugin"
 	"github.com/pkg/errors"
@@ -72,7 +74,7 @@ import (
 	"github.com/simple-container-com/api/pkg/plugin/runtime"
 
 	gcpApi "github.com/simple-container-com/sc-plugin-gcp/api"
-	echoInternal "github.com/simple-container-com/sc-plugin-gcp/plugin/internal"
+	gcpInternal "github.com/simple-container-com/sc-plugin-gcp/plugin/internal"
 )
 
 // gcpPlugin is the gRPC server impl. Fields follow the same shape every
@@ -83,7 +85,7 @@ type gcpPlugin struct {
 	scpluginv1.UnimplementedSCCloudPluginServer
 
 	mu        sync.Mutex
-	registrar *echoInternal.Registrar
+	registrar *gcpInternal.Registrar
 
 	// progress is the plugin's side of the LogStream RPC. SC core opens
 	// one LogStream per plugin after Schema() returns, and this is where
@@ -131,13 +133,12 @@ func (p *gcpPlugin) Schema(_ context.Context, _ *scpluginv1.SchemaRequest) (*scp
 		ComputeProcessorTypes: []string{gcpApi.ResourceTypeBucket},
 		StateStoreTypes:       []string{gcpApi.StateStorageTypeGcpBucket},
 		SecretsProviderTypes:  []string{gcpApi.SecretsProviderTypeGcpKms},
-		PulumiPlugins:         []*scpluginv1.PulumiPluginRequirement{
-			// Empty for gcp — a real cloud lists the Pulumi provider
-			// plugin names it imports: `{Package: "cloudflare", Version:
-			// "6.17.0"}`, `{Package: "yandex", Version: "1.1.0"}`, etc.
-			// Core materialises these in the stack's `plugins` block so
-			// `pulumi up` finds them. See
-			// github.com/pulumi/pulumi-<name>/sdk for versions.
+		PulumiPlugins: []*scpluginv1.PulumiPluginRequirement{
+			// pulumi-gcp — version pinned via plugin/go.mod
+			// (pulumi-gcp/sdk/v8 v8.41.1). Keep aligned with the
+			// go.mod pin when bumping; core materialises this into
+			// the stack's `plugins` block so `pulumi up` finds it.
+			{Package: "gcp", Version: "8.41.1"},
 		},
 		// VmDrivers: GCP has no VM driver today. Omit until/if a
 		// `gcp-vm` driver is scoped.
@@ -188,7 +189,7 @@ func (p *gcpPlugin) ProvisionRegistrar(stdctx context.Context, req *scpluginv1.P
 	}
 	defer runtime.Settle(rctx, &resp, &err)
 
-	r, rerr := echoInternal.NewRegistrar(rctx.Pulumi, stackZone, configZone)
+	r, rerr := gcpInternal.NewRegistrar(rctx.Pulumi, stackZone, configZone)
 	if rerr != nil {
 		p.progress.Error("provision-registrar", "init failed: "+rerr.Error())
 		return nil, errors.Wrap(rerr, "init gcp registrar")
@@ -253,29 +254,76 @@ func (p *gcpPlugin) Provision(stdctx context.Context, req *scpluginv1.ProvisionR
 	defer runtime.Settle(rctx, &resp, &err)
 
 	p.progress.Info("provision", fmt.Sprintf("provisioning gcp resource %q (type %q)", req.GetResourceName(), req.GetResourceType()))
-	urnStr, perr := echoInternal.ProvisionEcho(rctx.Pulumi, req.GetResourceType(), req.GetResourceName())
-	if perr != nil {
-		p.progress.Error("provision", perr.Error())
-		return nil, perr
-	}
 
-	// Export at least one output so HarvestExports has something to carry
-	// across the wire. A real plugin exports per-resource outputs under
-	// unique keys — see `plugin/internal/registrar.go`'s doc on the
-	// URN-vs-export-key split (trap 13): the Pulumi URN name is anchored
-	// to stack identity, but export keys should include the
-	// operator-visible name a consumer would want to reference. The
-	// placeholder below uses the operator's resource name; swap for your
-	// cloud's real export shape.
-	rctx.Pulumi.Export(fmt.Sprintf("%s-gcp-urn", req.GetResourceName()), sdk.String(urnStr))
+	stack := api.Stack{Name: req.GetHeader().GetStackName()}
+
+	switch req.GetResourceType() {
+	case gcpApi.ResourceTypeBucket:
+		cfg := &gcpApi.GcpBucket{}
+		if derr := decodeInputsAs(req.GetInputs(), cfg); derr != nil {
+			return nil, errors.Wrap(derr, "decode GcpBucket from Provision inputs")
+		}
+
+		// Build the GCP provider inline. Without this, `params.Provider`
+		// is nil at bucket.go:46 (`sdk.Provider(params.Provider)`),
+		// which resolves to `Providers(nil).applyResourceOption(...)`
+		// and calls `nil.getPackage()` on the first Pulumi resource
+		// option — nil-pointer deref, plugin process exits status 2,
+		// SC core sees `rpc error: EOF`. Same shape as mongodb/aws
+		// Provision handlers. Provider resource URN uses core's own
+		// formula (stack--type--name--env--provider) for byte-identical
+		// URN continuity with pre-split state.
+		providerResName := fmt.Sprintf("%s--%s--%s--%s--provider",
+			stack.Name, req.GetResourceType(), req.GetResourceName(), req.GetHeader().GetEnvironment())
+		provOut, perr := gcpInternal.Provider(rctx.Pulumi, stack, api.ResourceInput{
+			Descriptor: &api.ResourceDescriptor{
+				Type:   gcpApi.ProviderType,
+				Name:   providerResName,
+				Config: api.Config{Config: &cfg.Credentials},
+			},
+			StackParams: &api.StackParams{
+				StackName:   stack.Name,
+				Environment: req.GetHeader().GetEnvironment(),
+			},
+		}, pApi.ProvisionParams{Log: logger.New()})
+		if perr != nil {
+			p.progress.Error("provision", perr.Error())
+			return nil, errors.Wrap(perr, "build gcp provider inside Provision")
+		}
+		provider, ok := provOut.Ref.(sdk.ProviderResource)
+		if !ok {
+			return nil, errors.Errorf("gcp Provider returned %T, not sdk.ProviderResource", provOut.Ref)
+		}
+
+		input := api.ResourceInput{
+			Descriptor: &api.ResourceDescriptor{
+				Type:   req.GetResourceType(),
+				Name:   req.GetResourceName(),
+				Config: api.Config{Config: cfg},
+			},
+			StackParams: &api.StackParams{
+				StackName:   stack.Name,
+				Environment: req.GetHeader().GetEnvironment(),
+			},
+		}
+		out, bperr := gcpInternal.PrivateBucket(rctx.Pulumi, stack, input, pApi.ProvisionParams{Log: logger.New(), Provider: provider})
+		if bperr != nil {
+			p.progress.Error("provision", bperr.Error())
+			return nil, bperr
+		}
+		_ = out
+
+	default:
+		return nil, errors.Errorf("unsupported gcp resource type %q (walking-skeleton phase 2 covers only %q)", req.GetResourceType(), gcpApi.ResourceTypeBucket)
+	}
 
 	outputs, herr := runtime.HarvestExports(stdctx, rctx.Pulumi)
 	if herr != nil {
 		return nil, errors.Wrap(herr, "harvest provision exports")
 	}
 
-	p.progress.Info("provision", fmt.Sprintf("resource %q registered (urn=%s, %d output(s))", req.GetResourceName(), urnStr, len(outputs)))
-	return &scpluginv1.ProvisionResponse{Urn: urnStr, Outputs: outputs}, nil
+	p.progress.Info("provision", fmt.Sprintf("resource %q registered (%d output(s))", req.GetResourceName(), len(outputs)))
+	return &scpluginv1.ProvisionResponse{Outputs: outputs}, nil
 }
 
 // ComputeProcess is called by SC core for each dependency resource a
@@ -328,7 +376,20 @@ func (p *gcpPlugin) ComputeProcess(stdctx context.Context, req *scpluginv1.Compu
 	if parent != nil && parent.ParentEnv != "" {
 		p.progress.Info("compute-process", fmt.Sprintf("parent env %q (child env %q)", parent.ParentEnv, req.GetHeader().GetEnvironment()))
 	}
-	input := runtime.ResourceInputForComputeProcess(req, parent, map[string]any{})
+	cfg := &gcpApi.GcpBucket{}
+	if derr := decodeInputsAs(req.GetInputs(), cfg); derr != nil {
+		return nil, errors.Wrap(derr, "decode GcpBucket from ComputeProcess inputs")
+	}
+	input := runtime.ResourceInputForComputeProcess(req, parent, cfg)
+
+	// Dispatch by resource type. Phase 2 covers gcp-bucket only.
+	var processor func(*sdk.Context, api.Stack, api.ResourceInput, pApi.ComputeContextCollector, pApi.ProvisionParams) (*api.ResourceOutput, error)
+	switch req.GetResourceType() {
+	case gcpApi.ResourceTypeBucket:
+		processor = gcpInternal.BucketComputeProcessor
+	default:
+		return nil, errors.Errorf("unsupported gcp resource type %q for ComputeProcess (walking-skeleton phase 2 covers only %q)", req.GetResourceType(), gcpApi.ResourceTypeBucket)
+	}
 
 	// Drain + marshal are OWNED by RunComputeProcess. A plugin author
 	// cannot forget to await captured outputs — toResponse and
@@ -337,7 +398,7 @@ func (p *gcpPlugin) ComputeProcess(stdctx context.Context, req *scpluginv1.Compu
 		stdctx, rctx,
 		api.Stack{Name: req.GetHeader().GetStackName()}, input,
 		pApi.ProvisionParams{Log: logger.New(), ParentStack: parent},
-		echoInternal.EchoComputeProcessor,
+		processor,
 	)
 	if err != nil {
 		p.progress.Error("compute-process", err.Error())
@@ -394,7 +455,7 @@ func (p *gcpPlugin) ConvertStackConfig(_ context.Context, req *scpluginv1.Conver
 }
 
 func (p *gcpPlugin) PreDestroy(ctx context.Context, req *scpluginv1.PreDestroyRequest) (*scpluginv1.PreDestroyResponse, error) {
-	if err := echoInternal.PreDestroy(ctx, p.progress, req); err != nil {
+	if err := gcpInternal.PreDestroy(ctx, p.progress, req); err != nil {
 		p.progress.Error("pre-destroy", err.Error())
 	}
 	return &scpluginv1.PreDestroyResponse{}, nil
@@ -418,7 +479,7 @@ func (p *gcpPlugin) VmHosts(stdctx context.Context, req *scpluginv1.VmHostsReque
 	}
 	defer runtime.Settle(rctx, &resp, &err)
 
-	r, verr := echoInternal.VmHosts(rctx.Pulumi, req.GetResourceName())
+	r, verr := gcpInternal.VmHosts(rctx.Pulumi, req.GetResourceName())
 	if verr != nil {
 		p.progress.Error("vm-hosts", fmt.Sprintf("vm %q failed: %v", req.GetResourceName(), verr))
 		return nil, verr
@@ -534,6 +595,22 @@ var _ = vm.ResourceTypeVm
 // grep. A real plugin's ProvisionRegistrar builds an api.RegistrarDescriptor,
 // NewDnsRecord an api.DnsRecord, etc.
 var _ = api.Credentials{}
+
+// decodeInputsAs lifts the plugin bus's input map into a typed struct.
+// Mirrors the sc-plugin-mongodb helper of the same name — a nested
+// `<struct>Json` scalar fallback is preferred when the config tier
+// emits one (older SC cores dropped nested maps and lists), otherwise a
+// yaml round-trip through scPlugin.InputsToPlain carries structured
+// fields. GcpBucket today has no explicit JSON fallback, so the
+// structured path always wins.
+func decodeInputsAs[T any](inputs map[string]*scpluginv1.InputValue, out *T) error {
+	plain := scPlugin.InputsToPlain(inputs)
+	b, err := yaml.Marshal(plain)
+	if err != nil {
+		return err
+	}
+	return yaml.Unmarshal(b, out)
+}
 
 func main() {
 	impl := &gcpPlugin{progress: scPlugin.NewPublisher(0)}

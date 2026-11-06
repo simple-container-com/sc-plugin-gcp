@@ -7,7 +7,9 @@ require (
 	github.com/hashicorp/go-plugin v1.6.3
 	github.com/onsi/gomega v1.44.0
 	github.com/pkg/errors v0.9.1
+	github.com/pulumi/pulumi-gcp/sdk/v8 v8.41.1
 	github.com/pulumi/pulumi/sdk/v3 v3.245.0
+	github.com/samber/lo v1.53.0
 	github.com/simple-container-com/api v0.0.0-20261102142605-7a84b47744bf
 	github.com/simple-container-com/sc-plugin-gcp/api v0.0.0
 )
@@ -101,7 +103,6 @@ require (
 	github.com/pulumi/esc v0.24.0 // indirect
 	github.com/rivo/uniseg v0.4.7 // indirect
 	github.com/rogpeppe/go-internal v1.15.0 // indirect
-	github.com/samber/lo v1.53.0 // indirect
 	github.com/santhosh-tekuri/jsonschema/v5 v5.3.1 // indirect
 	github.com/sergi/go-diff v1.4.0 // indirect
 	github.com/sirupsen/logrus v1.9.4 // indirect

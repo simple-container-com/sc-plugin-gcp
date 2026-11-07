@@ -129,8 +129,8 @@ func (p *gcpPlugin) Schema(_ context.Context, _ *scpluginv1.SchemaRequest) (*scp
 		// (cloudrun, gcp-static-website, gcp-gke-autopilot) land in
 		// subsequent commits. No DNS registrar (GCP has none in-tree).
 		// No VM driver (GCP has none).
-		ResourceTypes:         []string{gcpApi.ResourceTypeBucket, gcpApi.ResourceTypePubSub, gcpApi.ResourceTypeRedis},
-		ComputeProcessorTypes: []string{gcpApi.ResourceTypeBucket, gcpApi.ResourceTypePubSub, gcpApi.ResourceTypeRedis},
+		ResourceTypes:         []string{gcpApi.ResourceTypeBucket, gcpApi.ResourceTypePubSub, gcpApi.ResourceTypeRedis, gcpApi.ResourceTypePostgresGcpCloudsql},
+		ComputeProcessorTypes: []string{gcpApi.ResourceTypeBucket, gcpApi.ResourceTypePubSub, gcpApi.ResourceTypeRedis, gcpApi.ResourceTypePostgresGcpCloudsql},
 		StateStoreTypes:       []string{gcpApi.StateStorageTypeGcpBucket},
 		// Both the Pulumi stack-secrets backend (gcp-kms) AND runtime
 		// secret-injection (gcp-secrets-manager) go under SecretsProviderTypes
@@ -400,9 +400,32 @@ func (p *gcpPlugin) Provision(stdctx context.Context, req *scpluginv1.ProvisionR
 			return nil, rerr
 		}
 
+	case gcpApi.ResourceTypePostgresGcpCloudsql:
+		cfg := &gcpApi.PostgresGcpCloudsqlConfig{}
+		if derr := decodeInputsAs(req.GetInputs(), cfg); derr != nil {
+			return nil, errors.Wrap(derr, "decode PostgresGcpCloudsqlConfig from Provision inputs")
+		}
+		provider, perr := buildProvider(&cfg.Credentials)
+		if perr != nil {
+			p.progress.Error("provision", perr.Error())
+			return nil, perr
+		}
+		input := api.ResourceInput{
+			Descriptor: &api.ResourceDescriptor{
+				Type:   req.GetResourceType(),
+				Name:   req.GetResourceName(),
+				Config: api.Config{Config: cfg},
+			},
+			StackParams: stackParams,
+		}
+		if _, pgerr := gcpInternal.Postgres(rctx.Pulumi, stack, input, pApi.ProvisionParams{Log: logger.New(), Provider: provider}); pgerr != nil {
+			p.progress.Error("provision", pgerr.Error())
+			return nil, pgerr
+		}
+
 	default:
-		return nil, errors.Errorf("unsupported gcp resource type %q (walking-skeleton phase 4c covers %q, %q, %q)",
-			req.GetResourceType(), gcpApi.ResourceTypeBucket, gcpApi.ResourceTypePubSub, gcpApi.ResourceTypeRedis)
+		return nil, errors.Errorf("unsupported gcp resource type %q (walking-skeleton phase 4d covers %q, %q, %q, %q)",
+			req.GetResourceType(), gcpApi.ResourceTypeBucket, gcpApi.ResourceTypePubSub, gcpApi.ResourceTypeRedis, gcpApi.ResourceTypePostgresGcpCloudsql)
 	}
 
 	outputs, herr := runtime.HarvestExports(stdctx, rctx.Pulumi)
@@ -494,9 +517,16 @@ func (p *gcpPlugin) ComputeProcess(stdctx context.Context, req *scpluginv1.Compu
 		}
 		cfg = redisCfg
 		processor = gcpInternal.RedisComputeProcessor
+	case gcpApi.ResourceTypePostgresGcpCloudsql:
+		pgCfg := &gcpApi.PostgresGcpCloudsqlConfig{}
+		if derr := decodeInputsAs(req.GetInputs(), pgCfg); derr != nil {
+			return nil, errors.Wrap(derr, "decode PostgresGcpCloudsqlConfig from ComputeProcess inputs")
+		}
+		cfg = pgCfg
+		processor = gcpInternal.PostgresComputeProcessor
 	default:
-		return nil, errors.Errorf("unsupported gcp resource type %q for ComputeProcess (walking-skeleton phase 4c covers %q, %q, %q)",
-			req.GetResourceType(), gcpApi.ResourceTypeBucket, gcpApi.ResourceTypePubSub, gcpApi.ResourceTypeRedis)
+		return nil, errors.Errorf("unsupported gcp resource type %q for ComputeProcess (walking-skeleton phase 4d covers %q, %q, %q, %q)",
+			req.GetResourceType(), gcpApi.ResourceTypeBucket, gcpApi.ResourceTypePubSub, gcpApi.ResourceTypeRedis, gcpApi.ResourceTypePostgresGcpCloudsql)
 	}
 	input := runtime.ResourceInputForComputeProcess(req, parent, cfg)
 

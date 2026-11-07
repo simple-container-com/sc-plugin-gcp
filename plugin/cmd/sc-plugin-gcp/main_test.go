@@ -31,8 +31,8 @@ func TestSchema_AdvertisesCanonicalTokens(t *testing.T) {
 	Expect(err).ToNot(HaveOccurred())
 
 	Expect(resp.GetProviderTypes()).To(ConsistOf(gcpApi.ProviderType))
-	Expect(resp.GetResourceTypes()).To(ConsistOf(gcpApi.ResourceTypeBucket, gcpApi.ResourceTypePubSub, gcpApi.ResourceTypeRedis))
-	Expect(resp.GetComputeProcessorTypes()).To(ConsistOf(gcpApi.ResourceTypeBucket, gcpApi.ResourceTypePubSub, gcpApi.ResourceTypeRedis))
+	Expect(resp.GetResourceTypes()).To(ConsistOf(gcpApi.ResourceTypeBucket, gcpApi.ResourceTypePubSub, gcpApi.ResourceTypeRedis, gcpApi.ResourceTypePostgresGcpCloudsql))
+	Expect(resp.GetComputeProcessorTypes()).To(ConsistOf(gcpApi.ResourceTypeBucket, gcpApi.ResourceTypePubSub, gcpApi.ResourceTypeRedis, gcpApi.ResourceTypePostgresGcpCloudsql))
 	Expect(resp.GetStateStoreTypes()).To(ConsistOf(gcpApi.StateStorageTypeGcpBucket))
 	Expect(resp.GetSecretsProviderTypes()).To(ConsistOf(
 		gcpApi.SecretsProviderTypeGcpKms,

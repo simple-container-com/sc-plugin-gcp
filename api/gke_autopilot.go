@@ -57,6 +57,15 @@ type GkeAutopilotResource struct {
 	// Resource adoption fields
 	Adopt       bool   `json:"adopt,omitempty" yaml:"adopt,omitempty"`
 	ClusterName string `json:"clusterName,omitempty" yaml:"clusterName,omitempty"`
+
+	// DeletionProtection is the cluster's deletion-protection flag,
+	// which Pulumi/GKE default to true — a production-safe default that
+	// makes `sc destroy` impossible without first flipping the field.
+	// Explicit `deletionProtection: false` opts into a smoke-friendly
+	// shape (destroy works end-to-end). Nil leaves the Pulumi default
+	// (true) in place. See forge/docs/roadmap/items/
+	// sc-plugin-gcp-gke-deletion-protection-no-config.md.
+	DeletionProtection *bool `json:"deletionProtection,omitempty" yaml:"deletionProtection,omitempty"`
 }
 
 type Timeouts struct {

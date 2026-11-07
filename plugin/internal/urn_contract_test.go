@@ -10,7 +10,6 @@ import (
 	"testing"
 
 	. "github.com/onsi/gomega"
-
 	"github.com/pulumi/pulumi/sdk/v3/go/common/resource"
 	"github.com/pulumi/pulumi/sdk/v3/go/pulumi"
 )
@@ -84,8 +83,11 @@ func withTrapFreeContext(t *testing.T, mocks *captureMocks, fn func(*pulumi.Cont
 }
 
 // TestURNContract_RegistrarRecord — the gcp DNS registrar registers one
-// resource per record, named `<record>-<type>`. This asserts the contract
-// a real plugin's registrar must preserve byte-for-byte.
+// resource per record, named `<name>-<type>-<4hex>` where `4hex` is the
+// first 4 bytes of hex(md5(Type + "|" + Value)). The value hash exists so
+// multi-A at one name produces N distinct URNs rather than silently
+// collapsing — see sc-plugin-cloudflare registrar.go:174-175 and
+// TestURNContract_DnsRecordName_DuplicateNames below for the mirror.
 func TestURNContract_RegistrarRecord(t *testing.T) {
 	RegisterTestingT(t)
 
@@ -99,8 +101,42 @@ func TestURNContract_RegistrarRecord(t *testing.T) {
 		return err
 	})
 
-	Expect(m.namesByType("gcp:dns:Record")).To(Equal([]string{"www-A"}),
-		"gcp registrar record name must be `<name>-<type>`. Changing this invalidates every pre-existing state file.")
+	// hex(md5("A|192.0.2.1"))[:8] = "88a33e82" (measured, not derived — the
+	// hash input is "<Type>|<Value>" byte-for-byte and the slice takes the
+	// first 4 bytes = 8 hex characters).
+	Expect(m.namesByType("gcp:dns:Record")).To(Equal([]string{"www-A-88a33e82"}),
+		"gcp registrar record name is `<name>-<type>-<4hex>`. Changing the hash input or length invalidates every pre-existing state file.")
+}
+
+// TestURNContract_DnsRecordName_DuplicateNames — two records at one name
+// with different values must produce distinct URNs so multi-A at a single
+// name works. Mirrors sc-plugin-cloudflare's
+// TestURNContract_DnsRecordName_DuplicateNames (`urn_contract_test.go:133-166`).
+// The api-side guard in sc-vm-multi-node-clusters Phase 2c refuses provision
+// when N NewRecord calls return the same URN, so an unfixed plugin fails
+// loud; this test is the plugin-side pin that keeps the fix landed.
+func TestURNContract_DnsRecordName_DuplicateNames(t *testing.T) {
+	RegisterTestingT(t)
+
+	m := &captureMocks{}
+	withTrapFreeContext(t, m, func(ctx *pulumi.Context) error {
+		r, err := NewRegistrar(ctx, "example.com", "example.com")
+		if err != nil {
+			return err
+		}
+		if _, err := r.NewRecord(ctx, "api", "A", "192.0.2.1"); err != nil {
+			return err
+		}
+		_, err = r.NewRecord(ctx, "api", "A", "192.0.2.2")
+		return err
+	})
+
+	// Measured hashes (see TestURNContract_RegistrarRecord comment for the
+	// hash input shape): "A|192.0.2.1" → 88a33e82, "A|192.0.2.2" → 6ed853af.
+	Expect(m.namesByType("gcp:dns:Record")).To(ConsistOf("api-A-88a33e82", "api-A-6ed853af"),
+		"two records at one name+type with different values must have distinct URNs via the md5(Type+Value)[:4] suffix. "+
+			"The alternative (one URN overwriting the other) breaks multi-A fleet ingress. "+
+			"See roadmap sc-plugin-gcp-dns-record-urn-collides-multi-a + sc-vm-multi-node-clusters Phase 2c.")
 }
 
 // TestURNContract_ProvisionEcho — the catch-all Provision RPC registers a

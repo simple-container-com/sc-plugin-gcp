@@ -193,6 +193,17 @@ func GkeAutopilot(ctx *sdk.Context, stack api.Stack, input api.ResourceInput, pa
 	}
 	ignoreChanges = append(ignoreChanges, applyControlPlaneAccess(clusterArgs, gkeInput.ControlPlaneAccess)...)
 
+	// DeletionProtection: GKE/Pulumi default is true (production-safe), so
+	// `sc destroy` on a cluster with no override stalls with
+	// `Cannot destroy cluster because deletion_protection is set to true`
+	// — operator must then go out-of-band. An explicit
+	// `deletionProtection: false` in server.yaml opts into the smoke
+	// shape. See forge/docs/roadmap/items/
+	// sc-plugin-gcp-gke-deletion-protection-no-config.md.
+	if gkeInput.DeletionProtection != nil {
+		clusterArgs.DeletionProtection = sdk.Bool(*gkeInput.DeletionProtection)
+	}
+
 	cluster, err := container.NewCluster(ctx, clusterName, clusterArgs, append(opts, sdk.IgnoreChanges(ignoreChanges), sdk.Timeouts(&timeouts))...)
 	if err != nil {
 		return nil, errors.Wrapf(err, "failed to create cluster %q in %q", clusterName, input.StackParams.Environment)

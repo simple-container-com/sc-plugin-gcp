@@ -8,6 +8,10 @@
 package gcp
 
 import (
+	"crypto/md5"
+	"encoding/hex"
+	"fmt"
+
 	"github.com/pkg/errors"
 	sdk "github.com/pulumi/pulumi/sdk/v3/go/pulumi"
 )
@@ -47,8 +51,18 @@ func (r *Registrar) MainDomain() string {
 //
 // A real registrar constructs a provider resource from pulumi-<cloud>
 // here (`cloudflare.NewRecord`, `yandex.NewDnsRecordSet`, ...).
+//
+// URN includes a 4-byte hex of md5(Type + "|" + Value). This mirrors
+// sc-plugin-cloudflare's registrar.go:174-175 so a multi-A at one name
+// produces N distinct URNs, not a single resource silently overwriting
+// itself. Required for fleet multi-A ingress (roadmap
+// sc-vm-multi-node-clusters Phase 2c) and the api-side guard that
+// refuses provision when N NewRecord calls return the same URN.
+// Live-caught shape on cloudflare 2026-11-03 (navizon-infra run
+// 41728410380); the same URN discipline applies here.
 func (r *Registrar) NewRecord(ctx *sdk.Context, recordName, recordType, value string) (string, error) {
-	resourceName := recordName + "-" + recordType
+	sum := md5.Sum([]byte(recordType + "|" + value))
+	resourceName := fmt.Sprintf("%s-%s-%s", recordName, recordType, hex.EncodeToString(sum[:4]))
 	comp := &echoComponent{}
 	if err := ctx.RegisterComponentResource(
 		"gcp:dns:Record",

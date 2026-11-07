@@ -142,6 +142,7 @@ func (p *gcpPlugin) Schema(_ context.Context, _ *scpluginv1.SchemaRequest) (*scp
 			// convertPluginOwnedTemplate, which only checks
 			// IsPluginOwnedType, not Kind.
 			gcpApi.TemplateTypeGcpCloudrun,
+			gcpApi.TemplateTypeStaticWebsite,
 		},
 		// ComputeProcessorTypes: not advertising artifact-registry or
 		// docker-image-push — neither has an in-tree compute processor
@@ -523,6 +524,59 @@ func (p *gcpPlugin) Provision(stdctx context.Context, req *scpluginv1.ProvisionR
 			return nil, cerr
 		}
 
+	case gcpApi.TemplateTypeStaticWebsite:
+		// gcp-static-website needs a GCP provider (GCS bucket + IAM) AND
+		// a registrar bridge (CNAME + override-header rule). The bridge
+		// dispatches params.Registrar.* calls back through SC core's
+		// SCCore.PeerInvoke endpoint — the host routes them to whichever
+		// plugin owns the stack's registrar type (cloudflare, cloudru-dns,
+		// yc-dns).
+		cfg := &gcpApi.StaticSiteInput{}
+		if derr := decodeInputsAs(req.GetInputs(), cfg); derr != nil {
+			return nil, errors.Wrap(derr, "decode StaticSiteInput from Provision inputs")
+		}
+		provider, perr := buildProvider(&cfg.TemplateConfig.Credentials)
+		if perr != nil {
+			p.progress.Error("provision", perr.Error())
+			return nil, perr
+		}
+		input := api.ResourceInput{
+			Descriptor: &api.ResourceDescriptor{
+				Type:   req.GetResourceType(),
+				Name:   req.GetResourceName(),
+				Config: api.Config{Config: cfg},
+			},
+			StackParams: stackParams,
+		}
+		params := pApi.ProvisionParams{
+			Log:            logger.New(),
+			ComputeContext: runtime.NewProvisionCollector(req),
+			Provider:       provider,
+		}
+		// Registrar bridge: dial SC core via the hashicorp/go-plugin
+		// broker, build the scCoreRegistrar bridge, close the peer when
+		// the Provision call returns. SetBroker fills p.broker on
+		// plugin startup; nil means the host didn't dial us yet, which
+		// shouldn't happen inside Provision.
+		if rpn := req.GetRegistrarPluginName(); rpn != "" {
+			p.mu.Lock()
+			broker := p.broker
+			p.mu.Unlock()
+			if broker == nil {
+				return nil, errors.New("registrar bridge requested but SetBroker was never called; plugin wiring is broken")
+			}
+			peer, prerr := scPlugin.NewPeerClient(stdctx, broker, req.GetHeader())
+			if prerr != nil {
+				return nil, errors.Wrap(prerr, "open PeerClient to SC core for registrar bridge")
+			}
+			defer peer.Close()
+			params.Registrar = newSCCoreRegistrar(peer, req.GetHeader(), rpn, req.GetRegistrarType(), req.GetRegistrarMainDomain())
+		}
+		if _, swerr := gcpInternal.StaticWebsite(rctx.Pulumi, stack, input, params); swerr != nil {
+			p.progress.Error("provision", swerr.Error())
+			return nil, swerr
+		}
+
 	default:
 		return nil, errors.Errorf("unsupported gcp resource type %q", req.GetResourceType())
 	}
@@ -694,6 +748,12 @@ func (p *gcpPlugin) ConvertStackConfig(ctx context.Context, req *scpluginv1.Conv
 			return nil, errors.Wrapf(rerr, "read docker-compose from %q/%q", stackDir, stackCfg.DockerComposeFile)
 		}
 		typedInput, cerr = gcpApi.ToCloudRunConfig(tplCfg, composeCfg, stackCfg)
+	case gcpApi.TemplateTypeStaticWebsite:
+		stackCfg := &api.StackConfigStatic{}
+		if err := decodeInputsAs(req.GetStackConfig(), stackCfg); err != nil {
+			return nil, errors.Wrap(err, "decode StackConfigStatic")
+		}
+		typedInput, cerr = gcpApi.ToStaticSiteConfig(tplCfg, stackDir, stackName, stackCfg)
 	default:
 		return nil, errors.Errorf("sc-plugin-gcp does not own template type %q", templateType)
 	}

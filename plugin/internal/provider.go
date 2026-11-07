@@ -4,6 +4,8 @@
 package gcp
 
 import (
+	gcpOptions "google.golang.org/api/option"
+
 	"github.com/pkg/errors"
 	"github.com/pulumi/pulumi-gcp/sdk/v8/go/gcp"
 	sdk "github.com/pulumi/pulumi/sdk/v3/go/pulumi"
@@ -12,6 +14,17 @@ import (
 
 	gcpApi "github.com/simple-container-com/sc-plugin-gcp/api"
 )
+
+// clientOptions authenticates a Google API client with the configured
+// key, or with Application Default Credentials when none is configured.
+// Lifted from api `pkg/clouds/pulumi/gcp/credentials.go`. Shared by
+// `services_api.go` (API-enable client init).
+func clientOptions(credentials string) []gcpOptions.ClientOption {
+	if gcpApi.UsesAmbientCredentials(credentials) {
+		return nil
+	}
+	return []gcpOptions.ClientOption{gcpOptions.WithCredentialsJSON([]byte(credentials))} //nolint:staticcheck // SA1019: no in-memory replacement available
+}
 
 // Provider builds the GCP Pulumi provider from a `gcp-service-account`
 // auth block. The URN name is the stack-prefixed input.ToResName of the

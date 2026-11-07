@@ -45,6 +45,7 @@ func init() {
 		ResourceTypePostgresGcpCloudsql:   PostgresqlGcpCloudsqlReadConfig,
 		ResourceTypeArtifactRegistry:      ArtifactRegistryConfigReadConfig,
 		ResourceTypeRemoteDockerImagePush: DockerRemoteImagePushReadConfig,
+		TemplateTypeGcpCloudrun:           ReadTemplateConfig,
 	})
 
 	// Fool-protection: SC core's parse-time validator auto-injects
@@ -70,10 +71,10 @@ func init() {
 			ResourceTypePostgresGcpCloudsql,
 			ResourceTypeArtifactRegistry,
 			ResourceTypeRemoteDockerImagePush,
+			TemplateTypeGcpCloudrun,
 			// Future lifts will add:
-			//   "gcp-gke-autopilot-cluster", "cloudrun",
-			//   "gcp-static-website", "gcp-gke-autopilot",
-			//   "gcp-docker-image-push"
+			//   "gcp-gke-autopilot-cluster",
+			//   "gcp-static-website", "gcp-gke-autopilot"
 		},
 		DefaultSource: api.PluginSource{
 			Type:       "github-release",

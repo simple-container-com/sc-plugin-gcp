@@ -35,6 +35,8 @@ func TestSchema_AdvertisesCanonicalTokens(t *testing.T) {
 		gcpApi.ResourceTypeBucket, gcpApi.ResourceTypePubSub, gcpApi.ResourceTypeRedis,
 		gcpApi.ResourceTypePostgresGcpCloudsql,
 		gcpApi.ResourceTypeArtifactRegistry, gcpApi.ResourceTypeRemoteDockerImagePush,
+		// Template types fold in — see stackread.go:165-170.
+		gcpApi.TemplateTypeGcpCloudrun,
 	))
 	// ComputeProcessorTypes is deliberately SMALLER than ResourceTypes:
 	// artifact-registry + docker-image-push have no in-tree compute

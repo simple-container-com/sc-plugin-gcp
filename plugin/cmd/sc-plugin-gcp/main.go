@@ -55,6 +55,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"os"
 	"sync"
@@ -67,6 +68,7 @@ import (
 	sdk "github.com/pulumi/pulumi/sdk/v3/go/pulumi"
 	"github.com/simple-container-com/api/pkg/api"
 	"github.com/simple-container-com/api/pkg/api/logger"
+	"github.com/simple-container-com/api/pkg/clouds/compose"
 	pApi "github.com/simple-container-com/api/pkg/clouds/pulumi/api"
 	"github.com/simple-container-com/api/pkg/clouds/vm"
 	scPlugin "github.com/simple-container-com/api/pkg/plugin"
@@ -133,6 +135,13 @@ func (p *gcpPlugin) Schema(_ context.Context, _ *scpluginv1.SchemaRequest) (*scp
 			gcpApi.ResourceTypeBucket, gcpApi.ResourceTypePubSub, gcpApi.ResourceTypeRedis,
 			gcpApi.ResourceTypePostgresGcpCloudsql,
 			gcpApi.ResourceTypeArtifactRegistry, gcpApi.ResourceTypeRemoteDockerImagePush,
+			// Template types fold into ResourceTypes (stackread.go:165-170
+			// — the parse-time distinction is drawn by WHERE server.yaml
+			// uses the type, not by Schema field). Routed to the plugin's
+			// ConvertStackConfig RPC in client.go via
+			// convertPluginOwnedTemplate, which only checks
+			// IsPluginOwnedType, not Kind.
+			gcpApi.TemplateTypeGcpCloudrun,
 		},
 		// ComputeProcessorTypes: not advertising artifact-registry or
 		// docker-image-push — neither has an in-tree compute processor
@@ -481,6 +490,39 @@ func (p *gcpPlugin) Provision(stdctx context.Context, req *scpluginv1.ProvisionR
 			return nil, dperr
 		}
 
+	case gcpApi.TemplateTypeGcpCloudrun:
+		// Template Provision: by the time this fires, SC core has
+		// already run the plugin's ConvertStackConfig handler against
+		// the parent TemplateConfig + client StackConfigCompose, so
+		// req.Inputs carries a serialised CloudRunInput. The Cloudrun
+		// body uses params.ComputeContext for cross-stack dependency
+		// URN inspection — hand it a runtime.NewProvisionCollector so
+		// any ApplyT chains the body enqueues drain through Settle on
+		// return. No GCP provider needed: the in-tree Cloudrun body is
+		// still a `not implemented` stub lifted unchanged (phase 4e
+		// preserves observable behaviour; a real reconciler is a
+		// follow-on slice).
+		cfg := &gcpApi.CloudRunInput{}
+		if derr := decodeInputsAs(req.GetInputs(), cfg); derr != nil {
+			return nil, errors.Wrap(derr, "decode CloudRunInput from Provision inputs")
+		}
+		input := api.ResourceInput{
+			Descriptor: &api.ResourceDescriptor{
+				Type:   req.GetResourceType(),
+				Name:   req.GetResourceName(),
+				Config: api.Config{Config: cfg},
+			},
+			StackParams: stackParams,
+		}
+		params := pApi.ProvisionParams{
+			Log:            logger.New(),
+			ComputeContext: runtime.NewProvisionCollector(req),
+		}
+		if _, cerr := gcpInternal.Cloudrun(rctx.Pulumi, stack, input, params); cerr != nil {
+			p.progress.Error("provision", cerr.Error())
+			return nil, cerr
+		}
+
 	default:
 		return nil, errors.Errorf("unsupported gcp resource type %q", req.GetResourceType())
 	}
@@ -618,36 +660,66 @@ func (p *gcpPlugin) ComputeProcess(stdctx context.Context, req *scpluginv1.Compu
 // turning a merged StackConfig* into the plugin's typed Input. SC
 // core only dials this when the template type is plugin-owned
 // (api.IsPluginOwnedType returns a binding whose PluginName matches
-// this plugin). The gcp template demonstrates the canonical shape:
-// read the InputValue tree, run the plugin's existing /api-side
-// ToXxxConfig closure (or an inline conversion), and marshal the
-// typed Input back as an InputValue tree.
+// this plugin). Dispatches on template_type to the right ToXxxConfig
+// closure, marshals the typed Input back as an InputValue tree, and
+// lifts the three structured fields SC core wraps in
+// pluginPreparedInput (base_dns_zone, uses, depends_on_resources)
+// from the typed Input's DnsConfigAware/ResourceAware/
+// WithDependsOnResources interface methods.
 //
-// For a real plugin — sc-plugin-aws / cloudflare / yandex — the body
-// delegates to the previously-SC-core-registered converter closures
-// (ToStaticSiteConfig, ToPagesConfig, …), reads base_dns_zone / uses
-// / depends_on_resources off the resulting typed Input, and returns.
-// The ONLY structural change on the plugin side is implementing this
-// RPC.
-func (p *gcpPlugin) ConvertStackConfig(_ context.Context, req *scpluginv1.ConvertStackConfigRequest) (*scpluginv1.ConvertStackConfigResponse, error) {
-	p.progress.Info("convert-stack-config", fmt.Sprintf("template=%q stack=%q dir=%q", req.GetTemplateType(), req.GetStackName(), req.GetStackDir()))
+// Template types currently owned by sc-plugin-gcp: cloudrun. Future
+// phases 4f/4g will add gcp-static-website + gcp-gke-autopilot as
+// additional cases.
+func (p *gcpPlugin) ConvertStackConfig(ctx context.Context, req *scpluginv1.ConvertStackConfigRequest) (*scpluginv1.ConvertStackConfigResponse, error) {
+	templateType := req.GetTemplateType()
+	stackName := req.GetStackName()
+	stackDir := req.GetStackDir()
+	p.progress.Info("convert-stack-config", fmt.Sprintf("template=%q stack=%q dir=%q", templateType, stackName, stackDir))
 
-	// Minimal response that exercises every field a real plugin
-	// would populate. A derived plugin replaces this with its real
-	// ToXxxConfig closure's output marshalled via scPlugin.PlainToInputs.
-	return &scpluginv1.ConvertStackConfigResponse{
-		Input: scPlugin.PlainToInputs(map[string]any{
-			"templateType": req.GetTemplateType(),
-			"stackName":    req.GetStackName(),
-			"stackDir":     req.GetStackDir(),
-		}),
-		BaseDnsZone: "gcp.example.com",
-		Uses:        []string{"gcp-bucket"},
-		// depends_on_resources: zero entries — the gcp stub does not
-		// synthesise cross-stack dependencies. A real plugin json-marshals
-		// each api.StackConfigDependencyResource into the repeated bytes
-		// field.
-	}, nil
+	tplCfg := &gcpApi.TemplateConfig{}
+	if err := decodeInputsAs(req.GetTemplateConfig(), tplCfg); err != nil {
+		return nil, errors.Wrapf(err, "decode template_config for %q", templateType)
+	}
+
+	var typedInput any
+	var cerr error
+	switch templateType {
+	case gcpApi.TemplateTypeGcpCloudrun:
+		stackCfg := &api.StackConfigCompose{}
+		if err := decodeInputsAs(req.GetStackConfig(), stackCfg); err != nil {
+			return nil, errors.Wrap(err, "decode StackConfigCompose")
+		}
+		composeCfg, rerr := compose.ReadDockerCompose(ctx, stackDir, stackCfg.DockerComposeFile)
+		if rerr != nil {
+			return nil, errors.Wrapf(rerr, "read docker-compose from %q/%q", stackDir, stackCfg.DockerComposeFile)
+		}
+		typedInput, cerr = gcpApi.ToCloudRunConfig(tplCfg, composeCfg, stackCfg)
+	default:
+		return nil, errors.Errorf("sc-plugin-gcp does not own template type %q", templateType)
+	}
+	if cerr != nil {
+		return nil, errors.Wrapf(cerr, "convert %q for stack %q", templateType, stackName)
+	}
+
+	resp := &scpluginv1.ConvertStackConfigResponse{
+		Input: scPlugin.PlainToInputs(typedInput),
+	}
+	if dca, ok := typedInput.(api.DnsConfigAware); ok {
+		resp.BaseDnsZone = dca.OverriddenBaseZone()
+	}
+	if ra, ok := typedInput.(api.ResourceAware); ok {
+		resp.Uses = ra.Uses()
+	}
+	if wdr, ok := typedInput.(api.WithDependsOnResources); ok {
+		for _, dep := range wdr.DependsOnResources() {
+			raw, jerr := json.Marshal(dep)
+			if jerr != nil {
+				return nil, errors.Wrap(jerr, "marshal depends-on entry")
+			}
+			resp.DependsOnResourcesJson = append(resp.DependsOnResourcesJson, raw)
+		}
+	}
+	return resp, nil
 }
 
 func (p *gcpPlugin) PreDestroy(ctx context.Context, req *scpluginv1.PreDestroyRequest) (*scpluginv1.PreDestroyResponse, error) {

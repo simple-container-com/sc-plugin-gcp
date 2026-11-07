@@ -132,7 +132,30 @@ func (p *gcpPlugin) Schema(_ context.Context, _ *scpluginv1.SchemaRequest) (*scp
 		ResourceTypes:         []string{gcpApi.ResourceTypeBucket},
 		ComputeProcessorTypes: []string{gcpApi.ResourceTypeBucket},
 		StateStoreTypes:       []string{gcpApi.StateStorageTypeGcpBucket},
-		SecretsProviderTypes:  []string{gcpApi.SecretsProviderTypeGcpKms},
+		// Both the Pulumi stack-secrets backend (gcp-kms) AND runtime
+		// secret-injection (gcp-secrets-manager) go under SecretsProviderTypes
+		// per the AWS bootstrap pattern (plugin_bootstrap.go:149 — both
+		// aws-kms and aws-secrets-manager advertised the same way). The
+		// kind-branching at mapping.go:162 fires provisionerFieldConfigMapping
+		// seeds for both, which is harmless (upsert); DetectSecretsType +
+		// DetectAuthProvider read providerConfigMapping anyway, which both
+		// get seeded by RegisterPluginOwnedType regardless.
+		SecretsProviderTypes: []string{
+			gcpApi.SecretsProviderTypeGcpKms,
+			gcpApi.SecretsTypeGCPSecretsManager,
+		},
+		// AuthTypes (api #559, released in a future api CalVer):
+		// advertise plugin-owned auth type via the Schema wire so SC
+		// core's providerConfigMapping gets the opaque decoder for
+		// `type: gcp-service-account` without requiring link-time
+		// import of sc-plugin-gcp/api. Only the auth discriminator
+		// belongs here — SecretsTypeGCPSecretsManager is a secrets-
+		// type (runtime `${secret:...}` resolution), NOT an auth type,
+		// and its channel is SecretsProviderTypes above. See the
+		// registerSchemaTypes loop order at stackread.go:170-212 and
+		// the silent-kind-overwrite trap: GetAuthTypes() is the LAST
+		// loop and would overwrite any kind set by an earlier loop.
+		AuthTypes: []string{gcpApi.AuthTypeGCPServiceAccount},
 		PulumiPlugins: []*scpluginv1.PulumiPluginRequirement{
 			// pulumi-gcp — version pinned via plugin/go.mod
 			// (pulumi-gcp/sdk/v8 v8.41.1). Keep aligned with the

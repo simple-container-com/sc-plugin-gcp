@@ -129,9 +129,21 @@ func (p *gcpPlugin) Schema(_ context.Context, _ *scpluginv1.SchemaRequest) (*scp
 		// (cloudrun, gcp-static-website, gcp-gke-autopilot) land in
 		// subsequent commits. No DNS registrar (GCP has none in-tree).
 		// No VM driver (GCP has none).
-		ResourceTypes:         []string{gcpApi.ResourceTypeBucket, gcpApi.ResourceTypePubSub, gcpApi.ResourceTypeRedis, gcpApi.ResourceTypePostgresGcpCloudsql},
-		ComputeProcessorTypes: []string{gcpApi.ResourceTypeBucket, gcpApi.ResourceTypePubSub, gcpApi.ResourceTypeRedis, gcpApi.ResourceTypePostgresGcpCloudsql},
-		StateStoreTypes:       []string{gcpApi.StateStorageTypeGcpBucket},
+		ResourceTypes: []string{
+			gcpApi.ResourceTypeBucket, gcpApi.ResourceTypePubSub, gcpApi.ResourceTypeRedis,
+			gcpApi.ResourceTypePostgresGcpCloudsql,
+			gcpApi.ResourceTypeArtifactRegistry, gcpApi.ResourceTypeRemoteDockerImagePush,
+		},
+		// ComputeProcessorTypes: not advertising artifact-registry or
+		// docker-image-push — neither has an in-tree compute processor
+		// (operators use them as parent-stack resources that produce
+		// outputs other services *consume*, but the env-var injection
+		// side is handled per-service — not generic).
+		ComputeProcessorTypes: []string{
+			gcpApi.ResourceTypeBucket, gcpApi.ResourceTypePubSub, gcpApi.ResourceTypeRedis,
+			gcpApi.ResourceTypePostgresGcpCloudsql,
+		},
+		StateStoreTypes: []string{gcpApi.StateStorageTypeGcpBucket},
 		// Both the Pulumi stack-secrets backend (gcp-kms) AND runtime
 		// secret-injection (gcp-secrets-manager) go under SecretsProviderTypes
 		// per the AWS bootstrap pattern (plugin_bootstrap.go:149 — both
@@ -423,9 +435,54 @@ func (p *gcpPlugin) Provision(stdctx context.Context, req *scpluginv1.ProvisionR
 			return nil, pgerr
 		}
 
+	case gcpApi.ResourceTypeArtifactRegistry:
+		cfg := &gcpApi.ArtifactRegistryConfig{}
+		if derr := decodeInputsAs(req.GetInputs(), cfg); derr != nil {
+			return nil, errors.Wrap(derr, "decode ArtifactRegistryConfig from Provision inputs")
+		}
+		provider, perr := buildProvider(&cfg.Credentials)
+		if perr != nil {
+			p.progress.Error("provision", perr.Error())
+			return nil, perr
+		}
+		input := api.ResourceInput{
+			Descriptor: &api.ResourceDescriptor{
+				Type:   req.GetResourceType(),
+				Name:   req.GetResourceName(),
+				Config: api.Config{Config: cfg},
+			},
+			StackParams: stackParams,
+		}
+		if _, arerr := gcpInternal.ArtifactRegistry(rctx.Pulumi, stack, input, pApi.ProvisionParams{Log: logger.New(), Provider: provider}); arerr != nil {
+			p.progress.Error("provision", arerr.Error())
+			return nil, arerr
+		}
+
+	case gcpApi.ResourceTypeRemoteDockerImagePush:
+		cfg := &gcpApi.RemoteImagePush{}
+		if derr := decodeInputsAs(req.GetInputs(), cfg); derr != nil {
+			return nil, errors.Wrap(derr, "decode RemoteImagePush from Provision inputs")
+		}
+		provider, perr := buildProvider(&cfg.Credentials)
+		if perr != nil {
+			p.progress.Error("provision", perr.Error())
+			return nil, perr
+		}
+		input := api.ResourceInput{
+			Descriptor: &api.ResourceDescriptor{
+				Type:   req.GetResourceType(),
+				Name:   req.GetResourceName(),
+				Config: api.Config{Config: cfg},
+			},
+			StackParams: stackParams,
+		}
+		if _, dperr := gcpInternal.RemoteImagePush(rctx.Pulumi, stack, input, pApi.ProvisionParams{Log: logger.New(), Provider: provider}); dperr != nil {
+			p.progress.Error("provision", dperr.Error())
+			return nil, dperr
+		}
+
 	default:
-		return nil, errors.Errorf("unsupported gcp resource type %q (walking-skeleton phase 4d covers %q, %q, %q, %q)",
-			req.GetResourceType(), gcpApi.ResourceTypeBucket, gcpApi.ResourceTypePubSub, gcpApi.ResourceTypeRedis, gcpApi.ResourceTypePostgresGcpCloudsql)
+		return nil, errors.Errorf("unsupported gcp resource type %q", req.GetResourceType())
 	}
 
 	outputs, herr := runtime.HarvestExports(stdctx, rctx.Pulumi)

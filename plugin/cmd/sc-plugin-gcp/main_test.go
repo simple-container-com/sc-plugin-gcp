@@ -31,8 +31,18 @@ func TestSchema_AdvertisesCanonicalTokens(t *testing.T) {
 	Expect(err).ToNot(HaveOccurred())
 
 	Expect(resp.GetProviderTypes()).To(ConsistOf(gcpApi.ProviderType))
-	Expect(resp.GetResourceTypes()).To(ConsistOf(gcpApi.ResourceTypeBucket, gcpApi.ResourceTypePubSub, gcpApi.ResourceTypeRedis, gcpApi.ResourceTypePostgresGcpCloudsql))
-	Expect(resp.GetComputeProcessorTypes()).To(ConsistOf(gcpApi.ResourceTypeBucket, gcpApi.ResourceTypePubSub, gcpApi.ResourceTypeRedis, gcpApi.ResourceTypePostgresGcpCloudsql))
+	Expect(resp.GetResourceTypes()).To(ConsistOf(
+		gcpApi.ResourceTypeBucket, gcpApi.ResourceTypePubSub, gcpApi.ResourceTypeRedis,
+		gcpApi.ResourceTypePostgresGcpCloudsql,
+		gcpApi.ResourceTypeArtifactRegistry, gcpApi.ResourceTypeRemoteDockerImagePush,
+	))
+	// ComputeProcessorTypes is deliberately SMALLER than ResourceTypes:
+	// artifact-registry + docker-image-push have no in-tree compute
+	// processor (consumers don't `uses:` them for env-var injection).
+	Expect(resp.GetComputeProcessorTypes()).To(ConsistOf(
+		gcpApi.ResourceTypeBucket, gcpApi.ResourceTypePubSub, gcpApi.ResourceTypeRedis,
+		gcpApi.ResourceTypePostgresGcpCloudsql,
+	))
 	Expect(resp.GetStateStoreTypes()).To(ConsistOf(gcpApi.StateStorageTypeGcpBucket))
 	Expect(resp.GetSecretsProviderTypes()).To(ConsistOf(
 		gcpApi.SecretsProviderTypeGcpKms,

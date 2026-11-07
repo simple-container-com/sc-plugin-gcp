@@ -4,16 +4,24 @@
 package gcp
 
 import (
+	"context"
+
 	gcpOptions "google.golang.org/api/option"
+
+	"golang.org/x/oauth2"
+	auth "golang.org/x/oauth2/google"
 
 	"github.com/pkg/errors"
 	"github.com/pulumi/pulumi-gcp/sdk/v8/go/gcp"
 	sdk "github.com/pulumi/pulumi/sdk/v3/go/pulumi"
 	"github.com/simple-container-com/api/pkg/api"
 	pApi "github.com/simple-container-com/api/pkg/clouds/pulumi/api"
+	"github.com/simple-container-com/api/pkg/clouds/pulumi/docker"
 
 	gcpApi "github.com/simple-container-com/sc-plugin-gcp/api"
 )
+
+const cloudPlatformScope = "https://www.googleapis.com/auth/cloud-platform"
 
 // clientOptions authenticates a Google API client with the configured
 // key, or with Application Default Credentials when none is configured.
@@ -74,4 +82,70 @@ func Provider(ctx *sdk.Context, stack api.Stack, input api.ResourceInput, params
 // plaintext.
 func secretCredentials(value string) sdk.StringPtrOutput {
 	return sdk.ToSecret(sdk.String(value)).(sdk.StringOutput).ToStringPtrOutput()
+}
+
+// tokenSource returns an OAuth2 token source for the configured key,
+// or for Application Default Credentials when none is configured. A
+// configured key must still be a service-account key: pinning the type
+// keeps an unexpected credential shape from being accepted from config.
+// Lifted from api `pkg/clouds/pulumi/gcp/credentials.go`.
+func tokenSource(ctx context.Context, credentials string) (oauth2.TokenSource, error) {
+	if gcpApi.UsesAmbientCredentials(credentials) {
+		creds, err := auth.FindDefaultCredentials(ctx, cloudPlatformScope)
+		if err != nil {
+			return nil, errors.Wrap(err, "credentials are empty (ambient mode) and no Application Default Credentials were found")
+		}
+		return creds.TokenSource, nil
+	}
+	creds, err := auth.CredentialsFromJSONWithTypeAndParams(ctx, []byte(credentials), auth.ServiceAccount, auth.CredentialsParams{
+		Scopes: []string{cloudPlatformScope},
+	})
+	if err != nil {
+		return nil, errors.Wrapf(err, "failed to parse GCP service account credentials")
+	}
+	return creds.TokenSource, nil
+}
+
+// AccessTokenCreds carries the three forms of a GCP access token that
+// Docker-side auth needs: the username+password pair the Docker CLI
+// understands, and the pre-encoded Authorization header.
+//
+// Lifted from api `pkg/clouds/pulumi/gcp/gke_autopilot_stack.go` where
+// it originally sat next to GKE's remote-image push path. Used by
+// `docker_image.go`'s `getDockerCredentialsWithAuthToken` + a future
+// GKE Autopilot lift (phase 4g).
+type AccessTokenCreds struct {
+	Username   string
+	Password   string
+	AuthHeader string
+}
+
+// getDockerCredentialsWithAuthToken mints a short-lived OAuth2 access
+// token from the resource's credentials and wraps it in both the
+// username+password Docker CLI shape AND the pre-encoded `Authorization`
+// header value a REST push needs. Lifted from api's gke_autopilot_stack.go.
+func getDockerCredentialsWithAuthToken(ctx *sdk.Context, input api.ResourceInput) (*AccessTokenCreds, error) {
+	authCfg, ok := input.Descriptor.Config.Config.(api.AuthConfig)
+	if !ok {
+		return nil, errors.Errorf("failed to cast resource descriptor to api.AuthConfig")
+	}
+	ts, err := tokenSource(ctx.Context(), authCfg.CredentialsValue())
+	if err != nil {
+		return nil, err
+	}
+	token, err := ts.Token()
+	if err != nil {
+		return nil, errors.Wrapf(err, "failed to get GCP token from credentials")
+	}
+	username := "oauth2accesstoken"
+	password := token.AccessToken
+	authHeader, err := docker.EncodeDockerAuthHeader(username, password)
+	if err != nil {
+		return nil, errors.Wrapf(err, "failed to generate docker auth header")
+	}
+	return &AccessTokenCreds{
+		Username:   username,
+		Password:   password,
+		AuthHeader: authHeader,
+	}, nil
 }

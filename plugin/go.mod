@@ -7,12 +7,16 @@ require (
 	github.com/hashicorp/go-plugin v1.6.3
 	github.com/onsi/gomega v1.44.0
 	github.com/pkg/errors v0.9.1
+	github.com/pulumi/pulumi-docker/sdk/v4 v4.11.2
 	github.com/pulumi/pulumi-gcp/sdk/v8 v8.41.1
+	github.com/pulumi/pulumi-kubernetes/sdk/v4 v4.32.0
+	github.com/pulumi/pulumi-random/sdk/v4 v4.21.0
 	github.com/pulumi/pulumi/sdk/v3 v3.245.0
 	github.com/samber/lo v1.53.0
 	github.com/simple-container-com/api v0.0.0-20261106174745-994111935a5d
 	github.com/simple-container-com/sc-plugin-gcp/api v0.0.0
 	golang.org/x/mod v0.41.0
+	golang.org/x/oauth2 v0.36.0
 	google.golang.org/api v0.284.0
 	gopkg.in/yaml.v3 v3.0.1
 )
@@ -130,9 +134,6 @@ require (
 	github.com/pulumi/appdash v0.0.0-20231130102222-75f619a67231 // indirect
 	github.com/pulumi/esc v0.24.0 // indirect
 	github.com/pulumi/pulumi-command/sdk v1.2.1 // indirect
-	github.com/pulumi/pulumi-docker/sdk/v4 v4.11.2 // indirect
-	github.com/pulumi/pulumi-kubernetes/sdk/v4 v4.32.0 // indirect
-	github.com/pulumi/pulumi-random/sdk/v4 v4.21.0 // indirect
 	github.com/rivo/uniseg v0.4.7 // indirect
 	github.com/rogpeppe/go-internal v1.15.0 // indirect
 	github.com/santhosh-tekuri/jsonschema/v5 v5.3.1 // indirect
@@ -171,7 +172,6 @@ require (
 	golang.org/x/crypto v0.58.0 // indirect
 	golang.org/x/exp v0.0.0-20260410095643-746e56fc9e2f // indirect
 	golang.org/x/net v0.62.0 // indirect
-	golang.org/x/oauth2 v0.36.0 // indirect
 	golang.org/x/sync v0.24.0 // indirect
 	golang.org/x/sys v0.49.0 // indirect
 	golang.org/x/term v0.47.0 // indirect

@@ -37,12 +37,14 @@ const ProviderType = "gcp"
 // only an un-landed token gets "unknown resource type" on upgrade.
 func init() {
 	api.RegisterProviderConfig(api.ConfigRegisterMap{
-		AuthTypeGCPServiceAccount:       ReadAuthServiceAccountConfig,
-		SecretsTypeGCPSecretsManager:    ReadSecretsProviderConfig,
-		ResourceTypeBucket:              GcpBucketReadConfig,
-		ResourceTypePubSub:              GcpPubSubTopicsReadConfig,
-		ResourceTypeRedis:               RedisReadConfig,
-		ResourceTypePostgresGcpCloudsql: PostgresqlGcpCloudsqlReadConfig,
+		AuthTypeGCPServiceAccount:         ReadAuthServiceAccountConfig,
+		SecretsTypeGCPSecretsManager:      ReadSecretsProviderConfig,
+		ResourceTypeBucket:                GcpBucketReadConfig,
+		ResourceTypePubSub:                GcpPubSubTopicsReadConfig,
+		ResourceTypeRedis:                 RedisReadConfig,
+		ResourceTypePostgresGcpCloudsql:   PostgresqlGcpCloudsqlReadConfig,
+		ResourceTypeArtifactRegistry:      ArtifactRegistryConfigReadConfig,
+		ResourceTypeRemoteDockerImagePush: DockerRemoteImagePushReadConfig,
 	})
 
 	// Fool-protection: SC core's parse-time validator auto-injects
@@ -66,6 +68,8 @@ func init() {
 			ResourceTypePubSub,
 			ResourceTypeRedis,
 			ResourceTypePostgresGcpCloudsql,
+			ResourceTypeArtifactRegistry,
+			ResourceTypeRemoteDockerImagePush,
 			// Future lifts will add:
 			//   "gcp-gke-autopilot-cluster", "cloudrun",
 			//   "gcp-static-website", "gcp-gke-autopilot",

@@ -129,8 +129,8 @@ func (p *gcpPlugin) Schema(_ context.Context, _ *scpluginv1.SchemaRequest) (*scp
 		// (cloudrun, gcp-static-website, gcp-gke-autopilot) land in
 		// subsequent commits. No DNS registrar (GCP has none in-tree).
 		// No VM driver (GCP has none).
-		ResourceTypes:         []string{gcpApi.ResourceTypeBucket},
-		ComputeProcessorTypes: []string{gcpApi.ResourceTypeBucket},
+		ResourceTypes:         []string{gcpApi.ResourceTypeBucket, gcpApi.ResourceTypePubSub},
+		ComputeProcessorTypes: []string{gcpApi.ResourceTypeBucket, gcpApi.ResourceTypePubSub},
 		StateStoreTypes:       []string{gcpApi.StateStorageTypeGcpBucket},
 		// Both the Pulumi stack-secrets backend (gcp-kms) AND runtime
 		// secret-injection (gcp-secrets-manager) go under SecretsProviderTypes
@@ -298,64 +298,88 @@ func (p *gcpPlugin) Provision(stdctx context.Context, req *scpluginv1.ProvisionR
 
 	stack := api.Stack{Name: req.GetHeader().GetStackName()}
 
-	switch req.GetResourceType() {
-	case gcpApi.ResourceTypeBucket:
-		cfg := &gcpApi.GcpBucket{}
-		if derr := decodeInputsAs(req.GetInputs(), cfg); derr != nil {
-			return nil, errors.Wrap(derr, "decode GcpBucket from Provision inputs")
-		}
+	// Shared across all resource types: decode the operator's config,
+	// build the GCP provider inline from the embedded Credentials
+	// (nil params.Provider SIGSEGVs the plugin process — see mongodb
+	// Provision for the full rationale), wrap in api.ResourceInput.
+	// Provider URN follows core's formula for byte-identical pre-split
+	// state continuity.
+	providerResName := fmt.Sprintf("%s--%s--%s--%s--provider",
+		stack.Name, req.GetResourceType(), req.GetResourceName(), req.GetHeader().GetEnvironment())
+	stackParams := &api.StackParams{
+		StackName:   stack.Name,
+		Environment: req.GetHeader().GetEnvironment(),
+	}
 
-		// Build the GCP provider inline. Without this, `params.Provider`
-		// is nil at bucket.go:46 (`sdk.Provider(params.Provider)`),
-		// which resolves to `Providers(nil).applyResourceOption(...)`
-		// and calls `nil.getPackage()` on the first Pulumi resource
-		// option — nil-pointer deref, plugin process exits status 2,
-		// SC core sees `rpc error: EOF`. Same shape as mongodb/aws
-		// Provision handlers. Provider resource URN uses core's own
-		// formula (stack--type--name--env--provider) for byte-identical
-		// URN continuity with pre-split state.
-		providerResName := fmt.Sprintf("%s--%s--%s--%s--provider",
-			stack.Name, req.GetResourceType(), req.GetResourceName(), req.GetHeader().GetEnvironment())
+	buildProvider := func(creds *gcpApi.Credentials) (sdk.ProviderResource, error) {
 		provOut, perr := gcpInternal.Provider(rctx.Pulumi, stack, api.ResourceInput{
 			Descriptor: &api.ResourceDescriptor{
 				Type:   gcpApi.ProviderType,
 				Name:   providerResName,
-				Config: api.Config{Config: &cfg.Credentials},
+				Config: api.Config{Config: creds},
 			},
-			StackParams: &api.StackParams{
-				StackName:   stack.Name,
-				Environment: req.GetHeader().GetEnvironment(),
-			},
+			StackParams: stackParams,
 		}, pApi.ProvisionParams{Log: logger.New()})
 		if perr != nil {
-			p.progress.Error("provision", perr.Error())
 			return nil, errors.Wrap(perr, "build gcp provider inside Provision")
 		}
 		provider, ok := provOut.Ref.(sdk.ProviderResource)
 		if !ok {
 			return nil, errors.Errorf("gcp Provider returned %T, not sdk.ProviderResource", provOut.Ref)
 		}
+		return provider, nil
+	}
 
+	switch req.GetResourceType() {
+	case gcpApi.ResourceTypeBucket:
+		cfg := &gcpApi.GcpBucket{}
+		if derr := decodeInputsAs(req.GetInputs(), cfg); derr != nil {
+			return nil, errors.Wrap(derr, "decode GcpBucket from Provision inputs")
+		}
+		provider, perr := buildProvider(&cfg.Credentials)
+		if perr != nil {
+			p.progress.Error("provision", perr.Error())
+			return nil, perr
+		}
 		input := api.ResourceInput{
 			Descriptor: &api.ResourceDescriptor{
 				Type:   req.GetResourceType(),
 				Name:   req.GetResourceName(),
 				Config: api.Config{Config: cfg},
 			},
-			StackParams: &api.StackParams{
-				StackName:   stack.Name,
-				Environment: req.GetHeader().GetEnvironment(),
-			},
+			StackParams: stackParams,
 		}
-		out, bperr := gcpInternal.PrivateBucket(rctx.Pulumi, stack, input, pApi.ProvisionParams{Log: logger.New(), Provider: provider})
-		if bperr != nil {
+		if _, bperr := gcpInternal.PrivateBucket(rctx.Pulumi, stack, input, pApi.ProvisionParams{Log: logger.New(), Provider: provider}); bperr != nil {
 			p.progress.Error("provision", bperr.Error())
 			return nil, bperr
 		}
-		_ = out
+
+	case gcpApi.ResourceTypePubSub:
+		cfg := &gcpApi.PubSubConfig{}
+		if derr := decodeInputsAs(req.GetInputs(), cfg); derr != nil {
+			return nil, errors.Wrap(derr, "decode PubSubConfig from Provision inputs")
+		}
+		provider, perr := buildProvider(&cfg.Credentials)
+		if perr != nil {
+			p.progress.Error("provision", perr.Error())
+			return nil, perr
+		}
+		input := api.ResourceInput{
+			Descriptor: &api.ResourceDescriptor{
+				Type:   req.GetResourceType(),
+				Name:   req.GetResourceName(),
+				Config: api.Config{Config: cfg},
+			},
+			StackParams: stackParams,
+		}
+		if _, pserr := gcpInternal.PubSubTopics(rctx.Pulumi, stack, input, pApi.ProvisionParams{Log: logger.New(), Provider: provider}); pserr != nil {
+			p.progress.Error("provision", pserr.Error())
+			return nil, pserr
+		}
 
 	default:
-		return nil, errors.Errorf("unsupported gcp resource type %q (walking-skeleton phase 2 covers only %q)", req.GetResourceType(), gcpApi.ResourceTypeBucket)
+		return nil, errors.Errorf("unsupported gcp resource type %q (walking-skeleton phase 4b covers %q, %q)",
+			req.GetResourceType(), gcpApi.ResourceTypeBucket, gcpApi.ResourceTypePubSub)
 	}
 
 	outputs, herr := runtime.HarvestExports(stdctx, rctx.Pulumi)
@@ -417,20 +441,34 @@ func (p *gcpPlugin) ComputeProcess(stdctx context.Context, req *scpluginv1.Compu
 	if parent != nil && parent.ParentEnv != "" {
 		p.progress.Info("compute-process", fmt.Sprintf("parent env %q (child env %q)", parent.ParentEnv, req.GetHeader().GetEnvironment()))
 	}
-	cfg := &gcpApi.GcpBucket{}
-	if derr := decodeInputsAs(req.GetInputs(), cfg); derr != nil {
-		return nil, errors.Wrap(derr, "decode GcpBucket from ComputeProcess inputs")
-	}
-	input := runtime.ResourceInputForComputeProcess(req, parent, cfg)
-
-	// Dispatch by resource type. Phase 2 covers gcp-bucket only.
-	var processor func(*sdk.Context, api.Stack, api.ResourceInput, pApi.ComputeContextCollector, pApi.ProvisionParams) (*api.ResourceOutput, error)
+	// Decode into the typed config for this resource + pick the
+	// matching compute processor. Each resource type decodes into its
+	// own /api config type, so decode + processor dispatch is one
+	// switch. Phase 4b covers gcp-bucket + gcp-pubsub.
+	var (
+		cfg       any
+		processor func(*sdk.Context, api.Stack, api.ResourceInput, pApi.ComputeContextCollector, pApi.ProvisionParams) (*api.ResourceOutput, error)
+	)
 	switch req.GetResourceType() {
 	case gcpApi.ResourceTypeBucket:
+		bucketCfg := &gcpApi.GcpBucket{}
+		if derr := decodeInputsAs(req.GetInputs(), bucketCfg); derr != nil {
+			return nil, errors.Wrap(derr, "decode GcpBucket from ComputeProcess inputs")
+		}
+		cfg = bucketCfg
 		processor = gcpInternal.BucketComputeProcessor
+	case gcpApi.ResourceTypePubSub:
+		pubsubCfg := &gcpApi.PubSubConfig{}
+		if derr := decodeInputsAs(req.GetInputs(), pubsubCfg); derr != nil {
+			return nil, errors.Wrap(derr, "decode PubSubConfig from ComputeProcess inputs")
+		}
+		cfg = pubsubCfg
+		processor = gcpInternal.PubSubTopicsProcessor
 	default:
-		return nil, errors.Errorf("unsupported gcp resource type %q for ComputeProcess (walking-skeleton phase 2 covers only %q)", req.GetResourceType(), gcpApi.ResourceTypeBucket)
+		return nil, errors.Errorf("unsupported gcp resource type %q for ComputeProcess (walking-skeleton phase 4b covers %q, %q)",
+			req.GetResourceType(), gcpApi.ResourceTypeBucket, gcpApi.ResourceTypePubSub)
 	}
+	input := runtime.ResourceInputForComputeProcess(req, parent, cfg)
 
 	// Drain + marshal are OWNED by RunComputeProcess. A plugin author
 	// cannot forget to await captured outputs — toResponse and

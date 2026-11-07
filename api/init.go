@@ -40,6 +40,7 @@ func init() {
 		AuthTypeGCPServiceAccount:    ReadAuthServiceAccountConfig,
 		SecretsTypeGCPSecretsManager: ReadSecretsProviderConfig,
 		ResourceTypeBucket:           GcpBucketReadConfig,
+		ResourceTypePubSub:           GcpPubSubTopicsReadConfig,
 	})
 
 	// Fool-protection: SC core's parse-time validator auto-injects
@@ -60,8 +61,9 @@ func init() {
 			StateStorageTypeGcpBucket,
 			SecretsProviderTypeGcpKms,
 			ResourceTypeBucket,
+			ResourceTypePubSub,
 			// Future lifts will add:
-			//   "gcp-pubsub", "gcp-redis", "gcp-cloudsql-postgres",
+			//   "gcp-redis", "gcp-cloudsql-postgres",
 			//   "gcp-gke-autopilot-cluster", "cloudrun",
 			//   "gcp-static-website", "gcp-gke-autopilot",
 			//   "gcp-docker-image-push"

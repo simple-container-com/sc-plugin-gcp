@@ -1,106 +1,110 @@
-# sc-plugin-echo
+# sc-plugin-gcp
 
-The template every SC cloud plugin clones from.
+The Simple Container plugin for Google Cloud Platform, extracted from
+`pkg/clouds/{gcloud,pulumi/gcp}` of
+[simple-container-com/api](https://github.com/simple-container-com/api) per
+the plugin-first policy in
+[`forge/docs/design/2026-10-24/sc-plugin-architecture/`](https://github.com/simple-container-com/forge/tree/main/docs/design/2026-10-24/sc-plugin-architecture).
 
-This repo is a **working** minimum-viable SC plugin:
+**Status: walking-skeleton, under extraction.** Not yet the authoritative
+source — in-tree `pkg/clouds/{gcloud,pulumi/gcp}` still ships with SC
+core until every GCP resource + template has landed here. See
+[`forge/docs/roadmap/items/sc-plugin-gcp-extraction.md`](https://github.com/simple-container-com/forge/blob/main/docs/roadmap/items/sc-plugin-gcp-extraction.md)
+for phase progress.
 
-- `go build ./...` + `go test ./...` pass against it untouched.
-- Every RPC class on the SC plugin bus is implemented as a canned-success stub
-  so you can grep for `echo`, replace it piece by piece, and run tests
-  continuously as you swap in real cloud logic.
-- Every handler uses `api/pkg/plugin/runtime`'s `NewContext` + `Settle` +
-  `HarvestExports` — the shared scaffolding that encodes the fifteen named
-  traps the first five plugin extractions paid for (2026-10-18 → 2026-11-01).
-  See [`TRAPS.md`](TRAPS.md) for the index + checklist, and
-  [`forge/docs/design/2026-11-01/plugin-extraction-playbook/`](https://github.com/simple-container-com/forge/tree/main/docs/design/2026-11-01/plugin-extraction-playbook/)
-  for the canonical catalogue.
-- The release workflow in `.github/workflows/release.yml` carries the memory-
-  pin that most SC plugin repos learned the hard way on their first release
-  run (`GOMAXPROCS=1 GOMEMLIMIT=6GiB`, `go build -p 1`) — keep it even for a
-  cloud whose Pulumi SDK is small today.
+## Shipped today
 
-## Writing a plugin from this template
+| Token | Kind | Phase |
+|---|---|---|
+| `gcp` | provider | 1 |
+| `gcp-service-account` | auth | 4a |
+| `gcp-bucket` | resource + state-store + compute processor | 2 |
+| `gcp-kms` | secrets-provider | 1 |
+| `gcp-secrets-manager` | secrets-provider (runtime secret injection) | 4a |
+| `gcp-pubsub` | resource + compute processor | 4b |
 
-See the full walkthrough at
-[`docs/docs/guides/plugin-authoring.md`](https://github.com/simple-container-com/api/blob/main/docs/docs/guides/plugin-authoring.md)
-in the api repo. Short version:
+## Not shipped yet
 
-1. **Clone**: `gh repo create <org>/sc-plugin-<cloud> --template simple-container-com/sc-plugin-echo`.
-2. **Rename**: `grep -rl echo | xargs sed -i 's/echo/<cloud>/g'` plus module
-   renames in both `go.mod` files.
-3. **Author the config tier** in `api/` — swap `EchoAccountConfig` for your
-   cloud's auth, `EchoDnsRegistrarConfig` for the per-zone shape, add resource
-   types. Keep `init.go`'s `RegisterPluginRequirement` call and update its
-   `OwnedTypes` list.
-4. **Author the provisioning tier** in `plugin/internal/` — the three
-   RPC bodies here register logical ComponentResources with no cloud side-
-   effects. Swap each body for calls against `pulumi-<cloud>` or a REST
-   client. Add the Pulumi provider you now import to Schema's
-   `PulumiPlugins`.
-5. **Test** using the `pulumi.NewContext` + `RunInfo.Mocks` pattern in
-   `plugin/internal/urn_contract_test.go` — NOT `pulumi.RunErr`, which
-   silently completes stranded registrations on tests' behalf and hides
-   the 2026-10-28 await-returns bug class (Addendum R of
-   `04-no-destroy-invariant.md`).
-6. **Release**: push to `main` → auto-release with CalVer. Three-platform
-   binaries + `sha256sums.txt`.
-7. **Pin from an operator's `server.yaml`**:
-   ```yaml
-   plugins:
-     <cloud>:
-       source:
-         type: github-release
-         repository: <org>/sc-plugin-<cloud>
-         version: v2026.MM.DD-<sha>
-   ```
-   or let fool-protection auto-resolve latest.
+- `gcp-redis`, `gcp-cloudsql-postgres`, `gcp-docker-image-push`,
+  `gcp-gke-autopilot-cluster` — resource lifts queued (phases 4c-4h).
+- `cloudrun`, `gcp-static-website`, `gcp-gke-autopilot` — template lifts.
+  Blocked on
+  [`forge/docs/roadmap/items/sc-plugin-template-type-has-no-wire-path.md`](https://github.com/simple-container-com/forge/blob/main/docs/roadmap/items/sc-plugin-template-type-has-no-wire-path.md)
+  — `SchemaResponse` has no `template_types` field yet.
+- Adoption path for existing buckets (`adopt: true`) — refused with a
+  loud error until lifted.
+
+## Release cadence
+
+Releases cut on every merge to `main` via GitHub Actions
+(`.github/workflows/release.yml`). CalVer tags of the shape
+`vYYYY.MM.DD-<short-sha>` and SemVer-looking tags from manual pushes
+both work; the release workflow emits four assets per cut: three
+binaries (`linux-amd64`, `linux-arm64`, `darwin-arm64`) and a
+`sha256sums.txt`.
+
+Operators pin a release in their stack's `plugins:` block:
+
+```yaml
+plugins:
+  gcp:
+    source:
+      type: github-release
+      repository: simple-container-com/sc-plugin-gcp
+      version: v2026.11.07-482e2e0
+```
+
+See [`docs/docs/guides/upgrading-to-plugins.md`](https://github.com/simple-container-com/api/blob/main/docs/docs/guides/upgrading-to-plugins.md)
+in api for the operator-facing pin workflow.
 
 ## Repo layout
 
+Two Go modules:
+
+- `api/` — the config tier. Lifted types + constants + `init()`
+  registrations SC core reads at parse time. Lightweight (no
+  pulumi-gcp SDK). SC core depends on this module via its own `go.mod`.
+- `plugin/` — the binary + provisioning tier. Imports pulumi-gcp SDK
+  (~500 MB in the module cache). Not imported by SC core; invoked as a
+  subprocess over the SC plugin bus.
+
+The two-module split is why extracting a plugin is worth the work: an
+SC core consumer no longer transitively pulls pulumi-gcp when it only
+needs the type discriminators.
+
+## Trap checklist baked in
+
+See [`TRAPS.md`](TRAPS.md) for the fifteen-trap index inherited from
+the shared `sc-plugin-echo` template. Three worth calling out for this
+plugin specifically:
+
+- **Trap 1 (defer-done cascade).** Every RPC uses
+  `runtime.NewContext(stdctx, header, …)` + `defer runtime.Settle(...)`
+  rather than `pctx.Close()`. Do not revert.
+- **Trap 14 (compute collector loses env vars).** The compute
+  processors write through the shared `pApi.ComputeContextCollector`
+  passed in; they never reimplement a local collector.
+- **Trap 20 (`string` field with structured content, deploy-time
+  refusal).** `api.Credentials.Credentials` is a `string` holding the
+  service-account JSON document; every opaque-path decode of a GCP
+  config inherits the hazard. See
+  [`forge/docs/design/2026-11-01/plugin-extraction-playbook/`](https://github.com/simple-container-com/forge/tree/main/docs/design/2026-11-01/plugin-extraction-playbook/)
+  Trap 20.
+
+## Development
+
+```bash
+cd api    && go test ./...      # config tier tests
+cd plugin && go test ./...      # provisioning tier tests
+cd plugin && go build ./...     # binary
 ```
-sc-plugin-echo/
-├── api/                     ← config tier. Published as its own Go module;
-│                              SC core imports this.
-│   ├── init.go              ← RegisterProviderConfig + RegisterPluginRequirement
-│   ├── auth.go              ← one AuthType with ReadConfig + Validate
-│   └── registrar.go         ← DnsRegistrarConfig + FunctionTemplateConfig stubs
-│
-├── plugin/                  ← provisioning tier. Compiled to the binary SC
-│                              launches as a go-plugin subprocess.
-│   ├── cmd/sc-plugin-echo/
-│   │   └── main.go          ← go-plugin server, Schema, every RPC
-│   └── internal/
-│       ├── registrar.go     ← echo DNS registrar (ComponentResource stub)
-│       ├── vm_hosts.go      ← echo VmHosts (byo-shaped host at TEST-NET)
-│       └── urn_contract_test.go
-│
-└── .github/workflows/
-    └── release.yml          ← CalVer, three-platform build, OOM-safe pins
-```
 
-## Prior art
+Pulumi-gcp SDK version is pinned in `plugin/go.mod` and must match the
+version advertised in `Schema.PulumiPlugins` — a test guards this
+(see `plugin/cmd/sc-plugin-gcp/main_test.go:TestSchema_PulumiPluginsVersion_MatchesGoMod`).
 
-Five live SC plugin repos were the sources this template was lifted from:
-
-- [`sc-plugin-cloudflare`](https://github.com/simple-container-com/sc-plugin-cloudflare) —
-  simplest registrar-only plugin, cleanest `main.go` scaffolding.
-- [`sc-plugin-yandex`](https://github.com/simple-container-com/sc-plugin-yandex) —
-  full provider+resource+state-store surface, origin of the release-workflow
-  OOM pins AND the `settle()`/`finishPulumiContext()` pattern now packaged
-  in `api/pkg/plugin/runtime`.
-- [`sc-plugin-cloudru`](https://github.com/simple-container-com/sc-plugin-cloudru) —
-  dual-mode binary (plugin + lifted cobra CLI), used for clouds with no
-  Pulumi provider at all.
-- [`sc-plugin-mongodb`](https://github.com/simple-container-com/sc-plugin-mongodb) —
-  first ComputeProcess-heavy plugin + `PreDestroy` with a database-drop
-  hook. Also the origin of the URN-vs-export-key split (trap 13).
-- [`sc-plugin-aws`](https://github.com/simple-container-com/sc-plugin-aws) —
-  the biggest surface (provider + state-store + secrets-provider + three
-  templates + five resources). First plugin to use `BrokerAware` →
-  `PeerInvoke` to delegate DNS to cloudflare without a Go-module import.
-  Carries the collector-split (trap 14) and ApplyT-forcing-function
-  (trap 15) fixes.
-
-## License
-
-MIT. See [LICENSE](LICENSE).
+Live `sc preview` roundtrip verified 2026-11-06 against a disposable
+GCP project (`forge-migration-smoke`): plugin binary downloaded from
+GitHub Release via SC's fetcher, Schema RPC answered, Provision
+dispatched, pulumi-gcp built the provider, preview planned seven
+resources end-to-end. See roadmap item for the full trace.

@@ -47,6 +47,8 @@ func init() {
 		ResourceTypeRemoteDockerImagePush: DockerRemoteImagePushReadConfig,
 		TemplateTypeGcpCloudrun:           ReadTemplateConfig,
 		TemplateTypeStaticWebsite:         ReadTemplateConfig,
+		ResourceTypeGkeAutopilot:          ReadGkeAutopilotResourceConfig,
+		TemplateTypeGkeAutopilot:          ReadGkeAutopilotTemplateConfig,
 	})
 
 	// Fool-protection: SC core's parse-time validator auto-injects
@@ -74,9 +76,8 @@ func init() {
 			ResourceTypeRemoteDockerImagePush,
 			TemplateTypeGcpCloudrun,
 			TemplateTypeStaticWebsite,
-			// Future lifts will add:
-			//   "gcp-gke-autopilot-cluster",
-			//   "gcp-gke-autopilot"
+			ResourceTypeGkeAutopilot,
+			TemplateTypeGkeAutopilot,
 		},
 		DefaultSource: api.PluginSource{
 			Type:       "github-release",

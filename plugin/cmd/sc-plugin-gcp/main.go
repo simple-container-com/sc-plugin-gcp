@@ -135,6 +135,7 @@ func (p *gcpPlugin) Schema(_ context.Context, _ *scpluginv1.SchemaRequest) (*scp
 			gcpApi.ResourceTypeBucket, gcpApi.ResourceTypePubSub, gcpApi.ResourceTypeRedis,
 			gcpApi.ResourceTypePostgresGcpCloudsql,
 			gcpApi.ResourceTypeArtifactRegistry, gcpApi.ResourceTypeRemoteDockerImagePush,
+			gcpApi.ResourceTypeGkeAutopilot,
 			// Template types fold into ResourceTypes (stackread.go:165-170
 			// — the parse-time distinction is drawn by WHERE server.yaml
 			// uses the type, not by Schema field). Routed to the plugin's
@@ -143,6 +144,7 @@ func (p *gcpPlugin) Schema(_ context.Context, _ *scpluginv1.SchemaRequest) (*scp
 			// IsPluginOwnedType, not Kind.
 			gcpApi.TemplateTypeGcpCloudrun,
 			gcpApi.TemplateTypeStaticWebsite,
+			gcpApi.TemplateTypeGkeAutopilot,
 		},
 		// ComputeProcessorTypes: not advertising artifact-registry or
 		// docker-image-push — neither has an in-tree compute processor
@@ -152,6 +154,7 @@ func (p *gcpPlugin) Schema(_ context.Context, _ *scpluginv1.SchemaRequest) (*scp
 		ComputeProcessorTypes: []string{
 			gcpApi.ResourceTypeBucket, gcpApi.ResourceTypePubSub, gcpApi.ResourceTypeRedis,
 			gcpApi.ResourceTypePostgresGcpCloudsql,
+			gcpApi.ResourceTypeGkeAutopilot,
 		},
 		StateStoreTypes: []string{gcpApi.StateStorageTypeGcpBucket},
 		// Both the Pulumi stack-secrets backend (gcp-kms) AND runtime
@@ -577,6 +580,85 @@ func (p *gcpPlugin) Provision(stdctx context.Context, req *scpluginv1.ProvisionR
 			return nil, swerr
 		}
 
+	case gcpApi.ResourceTypeGkeAutopilot:
+		// GKE Autopilot cluster lives under a PARENT stack; GkeAutopilot
+		// builds the cluster + CloudNAT + egress IP + Caddy ACME storage
+		// and exports kubeconfig + registry URL for consumer stacks.
+		cfg := &gcpApi.GkeAutopilotResource{}
+		if derr := decodeInputsAs(req.GetInputs(), cfg); derr != nil {
+			return nil, errors.Wrap(derr, "decode GkeAutopilotResource from Provision inputs")
+		}
+		provider, perr := buildProvider(&cfg.Credentials)
+		if perr != nil {
+			p.progress.Error("provision", perr.Error())
+			return nil, perr
+		}
+		input := api.ResourceInput{
+			Descriptor: &api.ResourceDescriptor{
+				Type:   req.GetResourceType(),
+				Name:   req.GetResourceName(),
+				Config: api.Config{Config: cfg},
+			},
+			StackParams: stackParams,
+		}
+		params := pApi.ProvisionParams{
+			Log:            logger.New(),
+			ComputeContext: runtime.NewProvisionCollector(req),
+			Provider:       provider,
+		}
+		if _, gerr := gcpInternal.GkeAutopilot(rctx.Pulumi, stack, input, params); gerr != nil {
+			p.progress.Error("provision", gerr.Error())
+			return nil, gerr
+		}
+
+	case gcpApi.TemplateTypeGkeAutopilot:
+		// gcp-gke-autopilot template consumes a parent-stack GKE
+		// cluster + artifact registry and deploys a compose-style
+		// Deployment/Service/Ingress into the cluster. Needs both a
+		// GCP provider (for OAuth2 docker auth to the Artifact
+		// Registry) AND the registrar bridge for Caddy override-header
+		// rules.
+		cfg := &gcpApi.GkeAutopilotInput{}
+		if derr := decodeInputsAs(req.GetInputs(), cfg); derr != nil {
+			return nil, errors.Wrap(derr, "decode GkeAutopilotInput from Provision inputs")
+		}
+		provider, perr := buildProvider(&cfg.GkeAutopilotTemplate.Credentials)
+		if perr != nil {
+			p.progress.Error("provision", perr.Error())
+			return nil, perr
+		}
+		input := api.ResourceInput{
+			Descriptor: &api.ResourceDescriptor{
+				Type:   req.GetResourceType(),
+				Name:   req.GetResourceName(),
+				Config: api.Config{Config: cfg},
+			},
+			StackParams: stackParams,
+		}
+		params := pApi.ProvisionParams{
+			Log:            logger.New(),
+			ComputeContext: runtime.NewProvisionCollector(req),
+			Provider:       provider,
+		}
+		if rpn := req.GetRegistrarPluginName(); rpn != "" {
+			p.mu.Lock()
+			broker := p.broker
+			p.mu.Unlock()
+			if broker == nil {
+				return nil, errors.New("registrar bridge requested but SetBroker was never called; plugin wiring is broken")
+			}
+			peer, prerr := scPlugin.NewPeerClient(stdctx, broker, req.GetHeader())
+			if prerr != nil {
+				return nil, errors.Wrap(prerr, "open PeerClient to SC core for registrar bridge")
+			}
+			defer peer.Close()
+			params.Registrar = newSCCoreRegistrar(peer, req.GetHeader(), rpn, req.GetRegistrarType(), req.GetRegistrarMainDomain())
+		}
+		if _, gerr := gcpInternal.GkeAutopilotStack(rctx.Pulumi, stack, input, params); gerr != nil {
+			p.progress.Error("provision", gerr.Error())
+			return nil, gerr
+		}
+
 	default:
 		return nil, errors.Errorf("unsupported gcp resource type %q", req.GetResourceType())
 	}
@@ -677,9 +759,18 @@ func (p *gcpPlugin) ComputeProcess(stdctx context.Context, req *scpluginv1.Compu
 		}
 		cfg = pgCfg
 		processor = gcpInternal.PostgresComputeProcessor
+	case gcpApi.ResourceTypeGkeAutopilot:
+		gkeCfg := &gcpApi.GkeAutopilotResource{}
+		if derr := decodeInputsAs(req.GetInputs(), gkeCfg); derr != nil {
+			return nil, errors.Wrap(derr, "decode GkeAutopilotResource from ComputeProcess inputs")
+		}
+		cfg = gkeCfg
+		processor = gcpInternal.GkeAutopilotComputeProcessor
 	default:
-		return nil, errors.Errorf("unsupported gcp resource type %q for ComputeProcess (walking-skeleton phase 4d covers %q, %q, %q, %q)",
-			req.GetResourceType(), gcpApi.ResourceTypeBucket, gcpApi.ResourceTypePubSub, gcpApi.ResourceTypeRedis, gcpApi.ResourceTypePostgresGcpCloudsql)
+		return nil, errors.Errorf("unsupported gcp resource type %q for ComputeProcess (walking-skeleton covers %q, %q, %q, %q, %q)",
+			req.GetResourceType(),
+			gcpApi.ResourceTypeBucket, gcpApi.ResourceTypePubSub, gcpApi.ResourceTypeRedis,
+			gcpApi.ResourceTypePostgresGcpCloudsql, gcpApi.ResourceTypeGkeAutopilot)
 	}
 	input := runtime.ResourceInputForComputeProcess(req, parent, cfg)
 
@@ -754,6 +845,25 @@ func (p *gcpPlugin) ConvertStackConfig(ctx context.Context, req *scpluginv1.Conv
 			return nil, errors.Wrap(err, "decode StackConfigStatic")
 		}
 		typedInput, cerr = gcpApi.ToStaticSiteConfig(tplCfg, stackDir, stackName, stackCfg)
+	case gcpApi.TemplateTypeGkeAutopilot:
+		// gcp-gke-autopilot template takes a StackConfigCompose and a
+		// GkeAutopilotTemplate (distinct from the base TemplateConfig —
+		// embeds Credentials plus `gkeClusterResource` +
+		// `artifactRegistryResource` pointers to the parent-stack
+		// resources this template consumes).
+		tplGke := &gcpApi.GkeAutopilotTemplate{}
+		if err := decodeInputsAs(req.GetTemplateConfig(), tplGke); err != nil {
+			return nil, errors.Wrapf(err, "decode GkeAutopilotTemplate for %q", templateType)
+		}
+		stackCfg := &api.StackConfigCompose{}
+		if err := decodeInputsAs(req.GetStackConfig(), stackCfg); err != nil {
+			return nil, errors.Wrap(err, "decode StackConfigCompose")
+		}
+		composeCfg, rerr := compose.ReadDockerCompose(ctx, stackDir, stackCfg.DockerComposeFile)
+		if rerr != nil {
+			return nil, errors.Wrapf(rerr, "read docker-compose from %q/%q", stackDir, stackCfg.DockerComposeFile)
+		}
+		typedInput, cerr = gcpApi.ToGkeAutopilotConfig(tplGke, composeCfg, stackCfg)
 	default:
 		return nil, errors.Errorf("sc-plugin-gcp does not own template type %q", templateType)
 	}

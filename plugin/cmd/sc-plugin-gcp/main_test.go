@@ -35,16 +35,22 @@ func TestSchema_AdvertisesCanonicalTokens(t *testing.T) {
 		gcpApi.ResourceTypeBucket, gcpApi.ResourceTypePubSub, gcpApi.ResourceTypeRedis,
 		gcpApi.ResourceTypePostgresGcpCloudsql,
 		gcpApi.ResourceTypeArtifactRegistry, gcpApi.ResourceTypeRemoteDockerImagePush,
+		gcpApi.ResourceTypeGkeAutopilot,
 		// Template types fold in — see stackread.go:165-170.
 		gcpApi.TemplateTypeGcpCloudrun,
 		gcpApi.TemplateTypeStaticWebsite,
+		gcpApi.TemplateTypeGkeAutopilot,
 	))
 	// ComputeProcessorTypes is deliberately SMALLER than ResourceTypes:
 	// artifact-registry + docker-image-push have no in-tree compute
-	// processor (consumers don't `uses:` them for env-var injection).
+	// processor (consumers don't `uses:` them for env-var injection);
+	// cloudrun + gcp-static-website + gcp-gke-autopilot are template
+	// types, consumed by their own Provision paths, not injected via
+	// `uses:`.
 	Expect(resp.GetComputeProcessorTypes()).To(ConsistOf(
 		gcpApi.ResourceTypeBucket, gcpApi.ResourceTypePubSub, gcpApi.ResourceTypeRedis,
 		gcpApi.ResourceTypePostgresGcpCloudsql,
+		gcpApi.ResourceTypeGkeAutopilot,
 	))
 	Expect(resp.GetStateStoreTypes()).To(ConsistOf(gcpApi.StateStorageTypeGcpBucket))
 	Expect(resp.GetSecretsProviderTypes()).To(ConsistOf(

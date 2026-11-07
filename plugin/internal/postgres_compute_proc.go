@@ -423,15 +423,3 @@ func cloudsqlProxyMetaFromOutput(namespace sdk.StringInput, cloudsqlProxyName st
 		},
 	}
 }
-
-// toKubeconfigExport mirrors the in-tree
-// `pkg/clouds/pulumi/gcp/gke_autopilot.go` helper which just delegates
-// to `pulumiKubernetes.ToKubeconfigExport`. The GKE Autopilot resource
-// hasn't been lifted yet (phase 4g, blocked on the
-// template_types-has-no-wire-path roadmap item), so this file
-// temporarily carries its own copy of the helper. When GKE lifts,
-// move this function into the lifted gke_autopilot.go and delete it
-// here.
-func toKubeconfigExport(clusterName string) string {
-	return clusterName + "-kubeconfig"
-}

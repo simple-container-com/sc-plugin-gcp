@@ -45,7 +45,7 @@ func init() {
 		ResourceTypePostgresGcpCloudsql:   PostgresqlGcpCloudsqlReadConfig,
 		ResourceTypeArtifactRegistry:      ArtifactRegistryConfigReadConfig,
 		ResourceTypeRemoteDockerImagePush: DockerRemoteImagePushReadConfig,
-		TemplateTypeGcpCloudrun:           ReadTemplateConfig,
+		TemplateTypeGcpCloudrun:           ReadCloudRunTemplateConfig,
 		TemplateTypeStaticWebsite:         ReadTemplateConfig,
 		ResourceTypeGkeAutopilot:          ReadGkeAutopilotResourceConfig,
 		TemplateTypeGkeAutopilot:          ReadGkeAutopilotTemplateConfig,

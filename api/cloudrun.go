@@ -16,8 +16,7 @@ const TemplateTypeGcpCloudrun = "cloudrun"
 
 // AlertsConfig holds the alerting knobs a Cloud Run deployment exposes.
 // Carried from in-tree verbatim — no plugin consumes or validates these
-// yet (the Pulumi-side Cloudrun handler is a `not implemented` stub),
-// but they shape the parent YAML operators already have on disk.
+// yet, but they shape the parent YAML operators already have on disk.
 type AlertsConfig struct {
 	MaxErrors MaxErrorConfig
 	Discord   DiscordCfg
@@ -37,14 +36,40 @@ type MaxErrorConfig struct {
 	MaxErrorCount         int
 }
 
+// CloudRunTemplate is the template config for `type: cloudrun`. Extends
+// the base `TemplateConfig` (Credentials) with:
+//
+//   - `ArtifactRegistryResource` — name of a parent-stack
+//     `gcp-artifact-registry` resource. Images from the client stack's
+//     docker-compose are built and pushed there before the Cloud Run
+//     service references them. Required: Cloud Run pulls images from GAR,
+//     not from arbitrary registries.
+//   - `Region` — Cloud Run deployment region (e.g. `us-central1`).
+//     Required: Cloud Run is a regional resource.
+//
+// Operators who used the stub body of this template (phase 4e lift from
+// in-tree) will find the stub never declared either field; they are new
+// to this slice and the Provision body now requires both. Operators who
+// never went past the stub have no state to carry forward.
+type CloudRunTemplate struct {
+	TemplateConfig           `json:",inline" yaml:",inline"`
+	ArtifactRegistryResource string `json:"artifactRegistryResource,omitempty" yaml:"artifactRegistryResource,omitempty"`
+	Region                   string `json:"region,omitempty" yaml:"region,omitempty"`
+}
+
+// ReadCloudRunTemplateConfig is the parse-time reader registered for
+// `TemplateTypeGcpCloudrun`. Replaces the shared `ReadTemplateConfig`
+// that the stub-era lift used; this one decodes the extra fields.
+func ReadCloudRunTemplateConfig(config *api.Config) (api.Config, error) {
+	return api.ConvertConfig(config, &CloudRunTemplate{})
+}
+
 // CloudRunInput is the typed Input SC core's PrepareCloudComposeForDeploy
 // path (now the plugin's ConvertStackConfig handler) produces for a
-// `type: cloudrun` client stack. Lifted from in-tree pkg/clouds/gcloud
-// unchanged so the YAML shape existing parent/child stacks have on disk
-// keeps parsing byte-identically.
+// `type: cloudrun` client stack.
 type CloudRunInput struct {
-	TemplateConfig `json:"templateConfig" yaml:"templateConfig"`
-	Deployment     k8s.DeploymentConfig `json:"deployment" yaml:"deployment"`
+	CloudRunTemplate `json:"templateConfig" yaml:"templateConfig"`
+	Deployment       k8s.DeploymentConfig `json:"deployment" yaml:"deployment"`
 }
 
 // Uses satisfies api.ResourceAware — SC core's deploy wrapper reads the
@@ -59,21 +84,36 @@ func (i *CloudRunInput) OverriddenBaseZone() string {
 	return i.Deployment.StackConfig.BaseDnsZone
 }
 
+// DependsOnResources satisfies api.WithDependsOnResources so SC core's
+// deploy wrapper can resolve cross-resource dependencies ahead of
+// template Provision.
+func (i *CloudRunInput) DependsOnResources() []api.StackConfigDependencyResource {
+	return i.Deployment.StackConfig.Dependencies
+}
+
 // ToCloudRunConfig is the converter closure the pre-A2 world registered
 // under cloudComposeConverterMapping. Post-A2 the plugin's
 // ConvertStackConfig handler calls it directly after decoding the
-// merged compose config from stackDir — same signature, same body.
+// merged compose config from stackDir. Accepts either the new
+// `*CloudRunTemplate` (preferred) or the legacy `*TemplateConfig`
+// (stub-era) — the legacy path lands with empty `ArtifactRegistryResource`
+// + `Region` and fails loud at Provision-time with a clear sentence.
 func ToCloudRunConfig(tpl any, composeCfg compose.Config, stackCfg *api.StackConfigCompose) (any, error) {
-	templateCfg, ok := tpl.(*TemplateConfig)
+	templateCfg, ok := tpl.(*CloudRunTemplate)
 	if !ok {
-		return nil, errors.Errorf("template config is not of type *gcp.TemplateConfig")
+		// Legacy stub-era shape: `*TemplateConfig` without the new fields.
+		if legacy, legacyOK := tpl.(*TemplateConfig); legacyOK {
+			templateCfg = &CloudRunTemplate{TemplateConfig: *legacy}
+		} else {
+			return nil, errors.Errorf("template config is not of type *gcp.CloudRunTemplate or *gcp.TemplateConfig")
+		}
 	}
 	if templateCfg == nil {
 		return nil, errors.Errorf("template config is nil")
 	}
 
 	res := &CloudRunInput{
-		TemplateConfig: *templateCfg,
+		CloudRunTemplate: *templateCfg,
 		Deployment: k8s.DeploymentConfig{
 			StackConfig: stackCfg,
 		},

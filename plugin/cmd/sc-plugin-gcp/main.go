@@ -321,6 +321,18 @@ func (p *gcpPlugin) Provision(stdctx context.Context, req *scpluginv1.ProvisionR
 
 	p.progress.Info("provision", fmt.Sprintf("provisioning gcp resource %q (type %q)", req.GetResourceName(), req.GetResourceType()))
 
+	// ParentInfo extraction (api #567): templates that read parent-stack
+	// outputs need ProvisionParams.ParentStack set. Older SC cores send an
+	// empty field, so parent stays nil — every consuming template body
+	// (gke_autopilot_stack.go, static_website.go) must nil-check before
+	// dereferencing. See
+	// forge/docs/roadmap/items/sc-plugin-provisionrequest-missing-parent-info.md
+	// for the two-guardrails framing.
+	parent, perr := runtime.ParentInfoFromProvisionRequest(req)
+	if perr != nil {
+		return nil, errors.Wrap(perr, "decode ParentInfo from provision request")
+	}
+
 	stack := api.Stack{Name: req.GetHeader().GetStackName()}
 
 	// Shared across all resource types: decode the operator's config,
@@ -495,17 +507,14 @@ func (p *gcpPlugin) Provision(stdctx context.Context, req *scpluginv1.ProvisionR
 		}
 
 	case gcpApi.TemplateTypeGcpCloudrun:
-		// Template Provision: by the time this fires, SC core has
-		// already run the plugin's ConvertStackConfig handler against
-		// the parent TemplateConfig + client StackConfigCompose, so
-		// req.Inputs carries a serialised CloudRunInput. The Cloudrun
-		// body uses params.ComputeContext for cross-stack dependency
-		// URN inspection — hand it a runtime.NewProvisionCollector so
-		// any ApplyT chains the body enqueues drain through Settle on
-		// return. No GCP provider needed: the in-tree Cloudrun body is
-		// still a `not implemented` stub lifted unchanged (phase 4e
-		// preserves observable behaviour; a real reconciler is a
-		// follow-on slice).
+		// Template Provision: by the time this fires, SC core has already
+		// run the plugin's ConvertStackConfig handler against the parent
+		// CloudRunTemplate + client StackConfigCompose, so req.Inputs
+		// carries a serialised CloudRunInput. The body builds its own GCP
+		// provider inline (same shape every GCP template uses) and reads
+		// the parent-stack artifact-registry URL via params.ParentStack.
+		// A registrar bridge is optional (only for stacks with a
+		// `domain:` on the compose config).
 		cfg := &gcpApi.CloudRunInput{}
 		if derr := decodeInputsAs(req.GetInputs(), cfg); derr != nil {
 			return nil, errors.Wrap(derr, "decode CloudRunInput from Provision inputs")
@@ -521,6 +530,26 @@ func (p *gcpPlugin) Provision(stdctx context.Context, req *scpluginv1.ProvisionR
 		params := pApi.ProvisionParams{
 			Log:            logger.New(),
 			ComputeContext: runtime.NewProvisionCollector(req),
+			// Parent-stack info: api #567's parent_info_json carries
+			// FullReference + StackName + ParentEnv across the bus so
+			// Cloudrun can read the artifact-registry URL from parent
+			// stack exports. Nil on older SC cores; the body nil-guards.
+			ParentStack: parent,
+		}
+		// Optional registrar bridge: only if the stack declares a domain.
+		if rpn := req.GetRegistrarPluginName(); rpn != "" {
+			p.mu.Lock()
+			broker := p.broker
+			p.mu.Unlock()
+			if broker == nil {
+				return nil, errors.New("registrar bridge requested but SetBroker was never called; plugin wiring is broken")
+			}
+			peer, prerr := scPlugin.NewPeerClient(stdctx, broker, req.GetHeader())
+			if prerr != nil {
+				return nil, errors.Wrap(prerr, "open PeerClient to SC core for registrar bridge")
+			}
+			defer peer.Close()
+			params.Registrar = newSCCoreRegistrar(peer, req.GetHeader(), rpn, req.GetRegistrarType(), req.GetRegistrarMainDomain())
 		}
 		if _, cerr := gcpInternal.Cloudrun(rctx.Pulumi, stack, input, params); cerr != nil {
 			p.progress.Error("provision", cerr.Error())
@@ -639,6 +668,12 @@ func (p *gcpPlugin) Provision(stdctx context.Context, req *scpluginv1.ProvisionR
 			Log:            logger.New(),
 			ComputeContext: runtime.NewProvisionCollector(req),
 			Provider:       provider,
+			// Parent-stack info: api #567's parent_info_json field carries
+			// FullReference + StackName + ParentEnv across the bus so the
+			// GKE Autopilot template body can read kubeconfig + registry
+			// URL from the parent stack. Nil on older SC cores; the
+			// template body nil-guards.
+			ParentStack: parent,
 		}
 		if rpn := req.GetRegistrarPluginName(); rpn != "" {
 			p.mu.Lock()
@@ -830,6 +865,14 @@ func (p *gcpPlugin) ConvertStackConfig(ctx context.Context, req *scpluginv1.Conv
 	var cerr error
 	switch templateType {
 	case gcpApi.TemplateTypeGcpCloudrun:
+		// cloudrun uses CloudRunTemplate (extends base TemplateConfig with
+		// Region + ArtifactRegistryResource). Decode into the extended
+		// shape; ToCloudRunConfig tolerates the base TemplateConfig fallback
+		// for legacy stub-era server.yamls.
+		tplCloudRun := &gcpApi.CloudRunTemplate{}
+		if err := decodeInputsAs(req.GetTemplateConfig(), tplCloudRun); err != nil {
+			return nil, errors.Wrapf(err, "decode CloudRunTemplate for %q", templateType)
+		}
 		stackCfg := &api.StackConfigCompose{}
 		if err := decodeInputsAs(req.GetStackConfig(), stackCfg); err != nil {
 			return nil, errors.Wrap(err, "decode StackConfigCompose")
@@ -838,7 +881,7 @@ func (p *gcpPlugin) ConvertStackConfig(ctx context.Context, req *scpluginv1.Conv
 		if rerr != nil {
 			return nil, errors.Wrapf(rerr, "read docker-compose from %q/%q", stackDir, stackCfg.DockerComposeFile)
 		}
-		typedInput, cerr = gcpApi.ToCloudRunConfig(tplCfg, composeCfg, stackCfg)
+		typedInput, cerr = gcpApi.ToCloudRunConfig(tplCloudRun, composeCfg, stackCfg)
 	case gcpApi.TemplateTypeStaticWebsite:
 		stackCfg := &api.StackConfigStatic{}
 		if err := decodeInputsAs(req.GetStackConfig(), stackCfg); err != nil {

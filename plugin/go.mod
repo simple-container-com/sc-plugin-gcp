@@ -15,7 +15,7 @@ require (
 	github.com/pulumi/pulumi-random/sdk/v4 v4.21.0
 	github.com/pulumi/pulumi/sdk/v3 v3.245.0
 	github.com/samber/lo v1.53.0
-	github.com/simple-container-com/api v0.0.0-20261106174745-994111935a5d
+	github.com/simple-container-com/api v0.0.0-20261108125250-00968155a92f
 	github.com/simple-container-com/sc-plugin-gcp/api v0.0.0
 	github.com/spf13/afero v1.15.0
 	go.uber.org/atomic v1.11.0
@@ -116,7 +116,7 @@ require (
 	github.com/josharian/intern v1.0.0 // indirect
 	github.com/json-iterator/go v1.1.12 // indirect
 	github.com/kevinburke/ssh_config v1.2.0 // indirect
-	github.com/klauspost/compress v1.18.7 // indirect
+	github.com/klauspost/compress v1.20.2 // indirect
 	github.com/klauspost/cpuid/v2 v2.3.0 // indirect
 	github.com/lucasb-eyer/go-colorful v1.4.0 // indirect
 	github.com/mailru/easyjson v0.7.7 // indirect

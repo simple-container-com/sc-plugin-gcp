@@ -146,6 +146,9 @@ func StaticWebsite(ctx *sdk.Context, stack api.Stack, input api.ResourceInput, p
 
 	params.Log.Info(ctx.Context(), "configure CNAME DNS record %q for %q in %q...", bucketName, stack.Name, input.StackParams.Environment)
 	bucketDomain := fmt.Sprintf("%s.storage.googleapis.com", bucketName)
+	if params.Registrar == nil {
+		return nil, errors.Errorf("gcp-static-website template requires a registrar to publish the CNAME for %q, but params.Registrar is nil. SC core resolved no plugin-backed registrar for this deploy — most likely the client stack's baseDnsZone/domain does not match any zone declared on the parent stack's `registrars:` block, or the plugin binary of the registrar (e.g. sc-plugin-cloudflare) is not declared under `plugins:` in server.yaml", stack.Name)
+	}
 	dnsRecord, err := params.Registrar.NewRecord(ctx, api.DnsRecord{
 		Name:    domain,
 		Value:   bucketDomain,

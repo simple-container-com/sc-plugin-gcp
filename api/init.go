@@ -51,6 +51,22 @@ func init() {
 		TemplateTypeGkeAutopilot:          ReadGkeAutopilotTemplateConfig,
 	})
 
+	// Provisioner-field typed decoders: state-storage + secrets-provider
+	// tokens go through a separate register (`ProvisionerFieldConfigRegister`)
+	// so an operator's `provisioner.config.state-storage: { type: gcp-bucket }`
+	// and `.secrets-provider: { type: gcp-kms }` parse into the typed
+	// `*StateStorageConfig` / `*SecretsProviderConfig` structs rather than
+	// the opaque `*api.PluginFieldConfig` the bootstrap-only path would
+	// leave them as. Mirrors the shape in-tree gcloud/init.go had — lifted
+	// here as part of phase 5 of the sc-plugin-gcp extraction, which was a
+	// gap in the phase 2 bucket+auth lift (ReadStateStorageConfig +
+	// ReadSecretsProviderConfig were carried but the Register call was
+	// not).
+	api.RegisterProvisionerFieldConfig(api.ProvisionerFieldConfigRegister{
+		StateStorageTypeGcpBucket: ReadStateStorageConfig,
+		SecretsProviderTypeGcpKms: ReadSecretsProviderConfig,
+	})
+
 	// Fool-protection: SC core's parse-time validator auto-injects
 	// `plugins.gcp:` with the latest release from GitHub when it finds
 	// an un-declared OwnedTypes token in server.yaml. Without this

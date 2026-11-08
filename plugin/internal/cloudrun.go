@@ -161,7 +161,7 @@ func Cloudrun(ctx *sdk.Context, stack api.Stack, input api.ResourceInput, params
 	// 4. Build the Cloud Run v2 service template. Containers go in as:
 	//    - the ingress container first (the one binding $PORT)
 	//    - every other compose service as a sidecar afterwards
-	containers := cloudrunContainers(cloudrunInput.Deployment, images)
+	containers := cloudrunContainers(cloudrunInput.Deployment, images, params.ComputeContext)
 	scale := cloudrunInput.Deployment.StackConfig.Scale
 
 	resourceLabels := map[string]string{
@@ -264,7 +264,7 @@ func buildCloudrunProvider(ctx *sdk.Context, serviceName string, cloudrunInput *
 // ServiceTemplateContainer shape. Puts the ingress container first (Cloud
 // Run requires exactly one port-exposing container, and convention has it
 // listed first).
-func cloudrunContainers(deployment k8s.DeploymentConfig, images []*kubernetes.ContainerImage) cloudrunv2.ServiceTemplateContainerArray {
+func cloudrunContainers(deployment k8s.DeploymentConfig, images []*kubernetes.ContainerImage, computeContext pApi.ComputeContext) cloudrunv2.ServiceTemplateContainerArray {
 	imageByName := map[string]sdk.StringOutput{}
 	for _, img := range images {
 		imageByName[img.Container.Name] = img.ImageName
@@ -306,8 +306,35 @@ func cloudrunContainers(deployment k8s.DeploymentConfig, images []*kubernetes.Co
 		if len(c.Args) > 0 {
 			container.Args = sdk.ToStringArray(c.Args)
 		}
-		envArgs := cloudrunv2.ServiceTemplateContainerEnvArray{}
+		// Merge env from three sources:
+		//   1. The compose service's own `environment:` block (c.Env).
+		//   2. The consuming stack's `uses:` block (computeContext.EnvVariables)
+		//      — compute processors for each used resource (gcp-bucket →
+		//      GCS_* + S3_*, gcp-redis → REDIS_HOST/PORT, gcp-pubsub →
+		//      GCP_PROJECT_ID, etc.) populated these on the shared
+		//      collector.
+		//   3. Secret env vars from the same collector (`SecretEnvVariables`).
+		// On key collision, uses:-contributed wins over the compose `env:`
+		// block only when the compose block did not set the key — matches
+		// the collector's own `IfNotExist` semantics on the SC side.
+		envMap := make(map[string]string, len(c.Env))
 		for k, v := range c.Env {
+			envMap[k] = v
+		}
+		if computeContext != nil {
+			for _, e := range computeContext.EnvVariables() {
+				if _, ok := envMap[e.Name]; !ok {
+					envMap[e.Name] = e.Value
+				}
+			}
+			for _, e := range computeContext.SecretEnvVariables() {
+				if _, ok := envMap[e.Name]; !ok {
+					envMap[e.Name] = e.Value
+				}
+			}
+		}
+		envArgs := cloudrunv2.ServiceTemplateContainerEnvArray{}
+		for k, v := range envMap {
 			envArgs = append(envArgs, &cloudrunv2.ServiceTemplateContainerEnvArgs{
 				Name:  sdk.String(k),
 				Value: sdk.String(v),

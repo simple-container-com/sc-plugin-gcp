@@ -131,7 +131,15 @@ func BucketComputeProcessor(ctx *sdk.Context, stack api.Stack, input api.Resourc
 		return nil, errors.Errorf("failed to convert bucket config for %q", input.Descriptor.Type)
 	}
 
-	bucketName := input.ToResName(lo.If(bucketCfg.Name == "", input.Descriptor.Name).Else(bucketCfg.Name))
+	// Match the export-key derivation in the Provision path (line ~45):
+	// GetBucketName() prefers the `bucketName:` override over `.Name`,
+	// otherwise falls back to Descriptor.Name. Using `.Name` alone here
+	// (the shape the pre-split in-tree code carried) diverged from
+	// provision when an operator set only `bucketName:` — the compute
+	// processor looked up `<Descriptor.Name>-bucket-name` but the
+	// parent-stack export landed under `<bucketName>-bucket-name`,
+	// yielding `no plain value for output …` on the consuming stack.
+	bucketName := input.ToResName(lo.If(bucketCfg.GetBucketName() == "", input.Descriptor.Name).Else(bucketCfg.GetBucketName()))
 
 	suffix := lo.If(params.ParentStack.DependsOnResource != nil, "--"+lo.FromPtr(params.ParentStack.DependsOnResource).Name).Else("")
 	params.Log.Info(ctx.Context(), "getting parent's (%q) outputs for gcp bucket %q (%q)", params.ParentStack.FullReference, bucketName, suffix)

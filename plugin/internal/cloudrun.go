@@ -90,7 +90,13 @@ func Cloudrun(ctx *sdk.Context, stack api.Stack, input api.ResourceInput, params
 	stackName := input.StackParams.StackName
 	environment := input.StackParams.Environment
 	suffix := lo.If(params.ParentStack.DependsOnResource != nil, "--"+lo.FromPtr(params.ParentStack.DependsOnResource).Name).Else("")
-	serviceName := input.ToResName(input.Descriptor.Name)
+	// Cloud Run service_id rules: lowercase letters + digits + hyphens,
+	// must start with a letter, can't end with a hyphen, <50 chars. SC
+	// core sets Descriptor.Name to the full stack FQN
+	// (`organization/<project>/<stack>`), which has slashes and busts
+	// those rules. Match GKE Autopilot's convention and build the name
+	// from StackParams.StackName instead.
+	serviceName := input.ToResName(stackName)
 
 	// Build the GCP provider inline from the template's credentials. Same
 	// shape every other GCP template uses; Cloud Run is a regional resource
@@ -98,6 +104,16 @@ func Cloudrun(ctx *sdk.Context, stack api.Stack, input api.ResourceInput, params
 	gcpProvider, err := buildCloudrunProvider(ctx, serviceName, cloudrunInput, region)
 	if err != nil {
 		return nil, errors.Wrapf(err, "build gcp provider for cloudrun %q", serviceName)
+	}
+
+	// Enable the Cloud Run Admin API on the project before we try to
+	// create a Service — otherwise the first provision in a fresh
+	// project fails with HTTP 403 SERVICE_DISABLED. Same pattern the
+	// artifactregistry, gke_autopilot and postgres bodies use for
+	// their respective APIs.
+	gcpServiceName := fmt.Sprintf("projects/%s/services/run.googleapis.com", cloudrunInput.ProjectId)
+	if err := enableServicesAPI(ctx.Context(), &cloudrunInput.CloudRunTemplate.Credentials, gcpServiceName); err != nil {
+		return nil, errors.Wrapf(err, "failed to enable %s", gcpServiceName)
 	}
 
 	// 1. Read the parent-stack artifact-registry URL. The plugin exports
@@ -169,12 +185,18 @@ func Cloudrun(ctx *sdk.Context, stack api.Stack, input api.ResourceInput, params
 	//    public shape; a future knob narrows to internal/internal-and-
 	//    cloud-load-balancing.
 	service, err := cloudrunv2.NewService(ctx, serviceName, &cloudrunv2.ServiceArgs{
-		Name:        sdk.String(serviceName),
-		Location:    sdk.String(region),
-		Ingress:     sdk.String("INGRESS_TRAFFIC_ALL"),
-		Template:    templateArgs,
-		Labels:      sdk.ToStringMap(resourceLabels),
-		Description: sdk.StringPtr(fmt.Sprintf("Cloud Run service for %s/%s (deployed by simple-container)", stackName, environment)),
+		Name:     sdk.String(serviceName),
+		Location: sdk.String(region),
+		Ingress:  sdk.String("INGRESS_TRAFFIC_ALL"),
+		Template: templateArgs,
+		Labels:   sdk.ToStringMap(resourceLabels),
+		// Default is true as of pulumi-gcp 8.x; leaving it on blocks
+		// destroy with `cannot destroy service without setting
+		// deletion_protection=false`. Match the pattern on
+		// GkeAutopilotResource (phase 4g): default off, overridable
+		// later via a config knob if operators want the guard.
+		DeletionProtection: sdk.BoolPtr(false),
+		Description:        sdk.StringPtr(fmt.Sprintf("Cloud Run service for %s/%s (deployed by simple-container)", stackName, environment)),
 	}, sdk.Provider(gcpProvider))
 	if err != nil {
 		return nil, errors.Wrapf(err, "create cloudrun service %q in %q", serviceName, environment)

@@ -5,6 +5,7 @@ package gcp
 
 import (
 	"fmt"
+	"strings"
 
 	"github.com/pkg/errors"
 	"github.com/pulumi/pulumi-gcp/sdk/v8/go/gcp/serviceaccount"
@@ -13,6 +14,7 @@ import (
 	"github.com/samber/lo"
 	"github.com/simple-container-com/api/pkg/api"
 	pApi "github.com/simple-container-com/api/pkg/clouds/pulumi/api"
+	"github.com/simple-container-com/api/pkg/util"
 
 	gcpApi "github.com/simple-container-com/sc-plugin-gcp/api"
 )
@@ -59,10 +61,17 @@ func AdoptPrivateBucket(ctx *sdk.Context, stack api.Stack, input api.ResourceInp
 
 	params.Log.Info(ctx.Context(), "creating service account for adopted bucket %q", bucketCfg.GetBucketName())
 
-	// Create a service account for S3-compatible access (same as provisioning)
+	// Create a service account for S3-compatible access. GCP's SA account_id
+	// is bounded [6, 30] chars and allows only [a-z0-9-], so sanitize the
+	// same way PrivateBucket does — otherwise an adopted bucket whose name
+	// is long enough to overflow (seen live on `sc-adopt-smoke-preexisting`
+	// = 46 chars post-env-suffix) fails SA create with a 400 instead of
+	// adopting. Pulumi logical name keeps the full form for URN stability.
 	serviceAccountName := fmt.Sprintf("%s-bucket-sa", bucketName)
+	sanitizedName := strings.ReplaceAll(serviceAccountName, "_", "-")
+	saAccountId := strings.ReplaceAll(util.TrimStringMiddle(sanitizedName, 28, "-"), "--", "-")
 	sa, err := serviceaccount.NewAccount(ctx, serviceAccountName, &serviceaccount.AccountArgs{
-		AccountId:   sdk.String(serviceAccountName),
+		AccountId:   sdk.String(saAccountId),
 		DisplayName: sdk.String(fmt.Sprintf("Service account for bucket %s", bucketCfg.GetBucketName())),
 	}, opts...)
 	if err != nil {

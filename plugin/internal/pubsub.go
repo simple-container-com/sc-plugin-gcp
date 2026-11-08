@@ -48,6 +48,14 @@ type PubSubResourcesOutput struct {
 }
 
 func appendInputLabels(baseLabels, additionalLabels gcpApi.PlainLabels) gcpApi.PlainLabels {
+	// Operators who omit `labels:` on the PubSubConfig get a nil map here —
+	// writing to it panics ("assignment to entry in nil map") and brings the
+	// plugin process down with a bare `rpc error: code = Unavailable` on the
+	// SC-core side. Initialise lazily so the verbatim in-tree lift tolerates
+	// the common no-labels-declared shape.
+	if baseLabels == nil {
+		baseLabels = gcpApi.PlainLabels{}
+	}
 	for key, value := range additionalLabels {
 		baseLabels[key] = value
 	}

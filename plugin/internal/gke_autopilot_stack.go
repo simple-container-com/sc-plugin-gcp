@@ -32,6 +32,30 @@ func GkeAutopilotStack(ctx *sdk.Context, stack api.Stack, input api.ResourceInpu
 		return nil, errors.Errorf("unsupported template type %q", input.Descriptor.Type)
 	}
 
+	// Trap 21 (version-skew) guardrail: gke-autopilot template reads
+	// parent-stack exports (kubeconfig, registry URL). If
+	// params.ParentStack is nil after api #567's wire-field lands, it
+	// can only mean an older SC core that pre-dates the field — SC
+	// core's deploy flow (pkg/clouds/pulumi/deploy.go:220) sets
+	// ParentStack unconditionally before dispatching ANY template
+	// Provision, and pkg/clouds/pulumi/deploy.go:97-99 refuses a child
+	// stack with no template before any dispatch. So nil here is NOT
+	// "preview with no parent" — it's always version skew.
+	//
+	// IMPORTANT: this invariant is TEMPLATE-TIER ONLY. The resource-tier
+	// Provision dispatch path builds ProvisionParams elsewhere and may
+	// not share the unconditional `ParentStack =` assignment. Any
+	// resource-tier (non-template) Provision that grows a
+	// params.ParentStack read must re-verify the invariant before
+	// copying this guard pattern.
+	//
+	// See forge/docs/roadmap/items/
+	// sc-plugin-provisionrequest-missing-parent-info.md + the companion
+	// sc-plugin-template-parentstack-nilcheck-lint item.
+	if params.ParentStack == nil {
+		return nil, errors.Errorf("gke-autopilot template requires a parent stack (kubeconfig + registry URL are read from parent exports); none was wired to the plugin. If you are on an older SC core, bump past api #567 which added parent_info_json to ProvisionRequest.")
+	}
+
 	gkeAutopilotInput, ok := input.Descriptor.Config.Config.(*gcpApi.GkeAutopilotInput)
 	if !ok {
 		return nil, errors.Errorf("failed to convert gke autopilot config for %q", input.Descriptor.Type)

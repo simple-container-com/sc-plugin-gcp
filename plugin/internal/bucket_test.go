@@ -93,11 +93,11 @@ func withBucketMockContext(t *testing.T, mocks *bucketMocks, fn func(*pulumi.Con
 // has its own trap (silent drain-hiding, see api Addendum R §R3).
 //
 // The minimum walking-skeleton proof of the lift is covered by the
-// WrongType and AdoptRefusedPhase2 tests below (code paths that
-// return before the first RegisterResource call), the plugin binary
-// builds + releases via GHA, and the config-decode round-trip tests
-// in main_test.go (future). The real URN parity check happens in the
-// live `sc preview` roundtrip once credentials are available.
+// WrongType test below (code path that returns before the first
+// RegisterResource call), the plugin binary builds + releases via GHA,
+// and the config-decode round-trip tests in main_test.go (future). The
+// real URN parity check happens in the live `sc preview` roundtrip
+// once credentials are available.
 
 // TestURNContract_PrivateBucket_WrongType pins the type-guard refusal.
 func TestURNContract_PrivateBucket_WrongType(t *testing.T) {
@@ -118,33 +118,4 @@ func TestURNContract_PrivateBucket_WrongType(t *testing.T) {
 		return nil
 	})
 	Expect(m.sortedNames()).To(BeEmpty(), "no resources should be registered on type guard refusal")
-}
-
-// TestURNContract_PrivateBucket_AdoptRefusedPhase2 pins the phase-2
-// not-yet-supported refusal. The in-tree `AdoptPrivateBucket` lift is
-// deferred; until it lands, Adopt: true must fail LOUDLY rather than
-// silently drop to the create path.
-func TestURNContract_PrivateBucket_AdoptRefusedPhase2(t *testing.T) {
-	RegisterTestingT(t)
-
-	m := &bucketMocks{}
-	withBucketMockContext(t, m, func(ctx *pulumi.Context) error {
-		cfg := &gcpApi.GcpBucket{
-			Location:   "us-central1",
-			Adopt:      true,
-			BucketName: "pre-existing-bucket",
-		}
-		input := api.ResourceInput{
-			Descriptor: &api.ResourceDescriptor{
-				Type:   gcpApi.ResourceTypeBucket,
-				Name:   "my-bucket",
-				Config: api.Config{Config: cfg},
-			},
-		}
-		_, err := PrivateBucket(ctx, api.Stack{Name: "test-stack"}, input, pApi.ProvisionParams{Log: logger.New()})
-		Expect(err).To(HaveOccurred())
-		Expect(err.Error()).To(ContainSubstring("bucket adoption"))
-		Expect(err.Error()).To(ContainSubstring("not yet supported"))
-		return nil
-	})
 }

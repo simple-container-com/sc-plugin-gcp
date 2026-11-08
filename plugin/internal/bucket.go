@@ -23,9 +23,10 @@ import (
 // (service account + object admin binding + HMAC key). Exported state:
 // bucket name, location, HMAC access key id, HMAC secret key.
 //
-// Lifted verbatim from api `pkg/clouds/pulumi/gcp/bucket.go`. The
-// `Adopt: true` adopt path is deferred to a later slice — the walking-
-// skeleton covers the create path only.
+// Lifted verbatim from api `pkg/clouds/pulumi/gcp/bucket.go`. When
+// `Adopt: true` the call is handed off to AdoptPrivateBucket, which
+// imports an existing bucket into Pulumi state rather than creating a
+// new one.
 func PrivateBucket(ctx *sdk.Context, stack api.Stack, input api.ResourceInput, params pApi.ProvisionParams) (*api.ResourceOutput, error) {
 	if input.Descriptor.Type != gcpApi.ResourceTypeBucket {
 		return nil, errors.Errorf("unsupported bucket type %q", input.Descriptor.Type)
@@ -36,8 +37,9 @@ func PrivateBucket(ctx *sdk.Context, stack api.Stack, input api.ResourceInput, p
 		return nil, errors.Errorf("failed to convert bucket config for %q", input.Descriptor.Type)
 	}
 
+	// Handle resource adoption - exit early if adopting
 	if bucketCfg.Adopt {
-		return nil, errors.New("bucket adoption (adopt: true) is not yet supported by sc-plugin-gcp — walking-skeleton phase 2 only covers the create path. See forge/docs/roadmap/items/sc-plugin-gcp-extraction.md")
+		return AdoptPrivateBucket(ctx, stack, input, params)
 	}
 
 	bucketName := input.ToResName(lo.If(bucketCfg.GetBucketName() == "", input.Descriptor.Name).Else(bucketCfg.GetBucketName()))

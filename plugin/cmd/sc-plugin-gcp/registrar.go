@@ -114,7 +114,24 @@ func (r *scCoreRegistrar) ProvisionRecords(_ *sdk.Context, _ pApi.ProvisionParam
 // correctly; the ApplyT on `ValueOut.ApplyT(...)` sees an empty string
 // when ValueOut is zero-state, and we use `Value` instead.
 func (r *scCoreRegistrar) NewRecord(ctx *sdk.Context, record api.DnsRecord) (*api.ResourceOutput, error) {
-	urnOut := record.ValueOut.ApplyT(func(resolvedValue string) (urn string, err error) {
+	// Canonicalise the input: ApplyT reflects on the Output's element
+	// type, and a zero-state `sdk.StringOutput{}` (what a caller gets by
+	// NOT setting ValueOut and passing only Value) has element type
+	// `interface{}` not `string`. The pulumi SDK then panics with
+	//   `applier's first input parameter must be assignable from
+	//    interface {}, got string`
+	// on the `func(resolvedValue string)` applier below. The gcp-static-
+	// website driver is the first caller to take the plain-Value path
+	// (the three in-tree callers lifted from AWS — ecs-fargate,
+	// aws-static-website, s3-bucket — all set ValueOut), which is why
+	// the fallback described in the comment above never fired until now.
+	// Construct a well-typed StringOutput from Value when ValueOut is
+	// absent, so the ApplyT has a proper `string`-typed source.
+	valueOut := record.ValueOut
+	if record.Value != "" {
+		valueOut = sdk.String(record.Value).ToStringOutput()
+	}
+	urnOut := valueOut.ApplyT(func(resolvedValue string) (urn string, err error) {
 		defer recoverApplyT(&err, "NewRecord")
 		if resolvedValue == "" {
 			resolvedValue = record.Value

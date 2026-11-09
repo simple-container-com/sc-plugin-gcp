@@ -20,27 +20,49 @@ const TemplateTypeStaticWebsite = "gcp-static-website"
 // api.DnsConfigAware (OverriddenBaseZone).
 type StaticSiteInput struct {
 	TemplateConfig         `json:"templateConfig" yaml:"templateConfig"`
-	*api.StackConfigStatic `json:",inline" yaml:",inline"`
+	*api.StackConfigStatic `json:"-" yaml:"-"`
 	StackDir               string `json:"stackDir" yaml:"stackDir"`
 	StackName              string `json:"stackName" yaml:"stackName"`
-	// NOTE: `Location` + `BaseDnsZone` are intentionally NOT declared
-	// here — they are inherited from the embedded *api.StackConfigStatic
-	// (Location directly, BaseDnsZone via the embedded Site). Declaring
-	// either at this level built an in-tree struct with two YAML tags for
-	// the same key, which yaml.v3 refuses on unmarshal with
-	// `panic: duplicated key '<field>' in struct gcp.StaticSiteInput`.
-	// The in-tree path never exercised the yaml.v3 round-trip because SC
-	// core decoded structs via mapstructure; the plugin bus does yaml-pack
-	// (pkg/plugin/runtime/decode.go), so the duplicate blew up on the
-	// first gcp-static-website provision.
+
+	// Flat scalar fields the plugin body reads. Populated by
+	// `ToStaticSiteConfig` from the embedded `*api.StackConfigStatic` so
+	// they SURVIVE the plugin-bus JSON+YAML roundtrip. See the asymmetry
+	// note on `StackConfigStatic` above the `json:"-" yaml:"-"` tag.
+	//
+	// Why this exists: `encoding/json` ignores the `,inline` tag (it's a
+	// yaml.v3 convention, not a Go stdlib one), so a nested-inline-with-
+	// pointer embed — `*api.StackConfigStatic` → inline Site
+	// StaticSiteConfig → inline fields — serialises to JSON as a nested
+	// object (keyed on the Go field name). On the plugin side yaml.v3's
+	// `inline` decoder then expects FLATTENED fields at the top, can't
+	// find them, and leaves every Site field zero. The body reading
+	// `in.Site.Domain` got "" every time, and the CF plugin's
+	// NewDnsRecord / NewOverrideHeaderRule received empty names that CF
+	// rejected with `9000 DNS name is invalid` / `10022 Route pattern
+	// must include zone name`. Live-caught on #568's preview-publish
+	// workflow against `dist.simple-container.com`, 2026-11-08/09.
+	//
+	// The embed stays on the Go side (methods like `Uses()` on
+	// `*StackConfigStatic` are called by SC core via interface assertion,
+	// so the ambient fields must stay reachable), but is marked `json:"-"
+	// yaml:"-"` so it doesn't get serialised with the broken inline
+	// shape. Explicit scalar fields below carry what the plugin body
+	// actually reads.
+	Domain        string `json:"domain" yaml:"domain"`
+	BaseDnsZone   string `json:"baseDnsZone" yaml:"baseDnsZone"`
+	IndexDocument string `json:"indexDocument" yaml:"indexDocument"`
+	ErrorDocument string `json:"errorDocument" yaml:"errorDocument"`
+	BundleDir     string `json:"bundleDir" yaml:"bundleDir"`
+	BucketName    string `json:"bucketName" yaml:"bucketName"`
+	Location      string `json:"location" yaml:"location"`
 }
 
-// OverriddenBaseZone satisfies api.DnsConfigAware.
+// OverriddenBaseZone satisfies api.DnsConfigAware. Reads the flat
+// BaseDnsZone field (set by ToStaticSiteConfig), which survives the
+// plugin-bus roundtrip. The embedded Site chain does not — see the
+// struct comment.
 func (i *StaticSiteInput) OverriddenBaseZone() string {
-	if i.StackConfigStatic == nil {
-		return ""
-	}
-	return i.Site.BaseDnsZone
+	return i.BaseDnsZone
 }
 
 // ToStaticSiteConfig is the converter closure the pre-A2 world
@@ -62,6 +84,15 @@ func ToStaticSiteConfig(tpl any, stackDir, stackName string, stackCfg *api.Stack
 		StackConfigStatic: stackCfg,
 		StackDir:          stackDir,
 		StackName:         stackName,
+		// Flat scalar mirror of the embedded chain — survives the
+		// plugin-bus JSON+YAML roundtrip (see struct comment).
+		Domain:        stackCfg.Site.Domain,
+		BaseDnsZone:   stackCfg.Site.BaseDnsZone,
+		IndexDocument: stackCfg.Site.IndexDocument,
+		ErrorDocument: stackCfg.Site.ErrorDocument,
+		BundleDir:     stackCfg.BundleDir,
+		BucketName:    stackCfg.BucketName,
+		Location:      stackCfg.Location,
 	}
 
 	if stackCfg.Location == "" {

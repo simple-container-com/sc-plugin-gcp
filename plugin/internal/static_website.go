@@ -64,7 +64,11 @@ func StaticWebsite(ctx *sdk.Context, stack api.Stack, input api.ResourceInput, p
 	out := &StaticSiteOutput{}
 
 	bucketName := fmt.Sprintf("%s--%s", ctx.Project(), stack.Name)
-	domain := in.Site.Domain
+	// Read flat Domain/IndexDocument/ErrorDocument scalars populated by
+	// ToStaticSiteConfig — the embedded `in.Site.*` chain is lost on the
+	// plugin-bus JSON→YAML roundtrip (encoding/json ignores `,inline`,
+	// yaml.v3 does not; see api/static_website.go).
+	domain := in.Domain
 
 	if in.BucketName != "" {
 		// override bucket name
@@ -166,8 +170,8 @@ func StaticWebsite(ctx *sdk.Context, stack api.Stack, input api.ResourceInput, p
 		FromHost: domain,
 		ToHost:   sdk.String(bucketDomain),
 		OverridePages: &pApi.OverridePagesRule{
-			IndexPage:    in.Site.IndexDocument,
-			NotFoundPage: in.Site.ErrorDocument,
+			IndexPage:    in.IndexDocument,
+			NotFoundPage: in.ErrorDocument,
 		},
 	})
 	if err != nil {

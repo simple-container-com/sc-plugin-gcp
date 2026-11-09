@@ -5,6 +5,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
@@ -14,6 +15,7 @@ import (
 
 	. "github.com/onsi/gomega"
 	"github.com/simple-container-com/api/pkg/api"
+	scPlugin "github.com/simple-container-com/api/pkg/plugin"
 	scpluginv1 "github.com/simple-container-com/api/pkg/plugin/proto/v1"
 
 	gcpApi "github.com/simple-container-com/sc-plugin-gcp/api"
@@ -232,4 +234,110 @@ func TestSchema_PulumiPluginsVersion_MatchesGoMod(t *testing.T) {
 			"pulumi-%s drift: Schema advertises %s, go.mod pins %s — core prefetches one version while the driver's SDK demands the other (cloudru-tls shape, 2026-11-06)",
 			pp.GetPackage(), pp.GetVersion(), modVer)
 	}
+}
+
+// TestConvertStackConfig_StaticWebsiteDomainSurvivesRoundTrip pins
+// that the ConvertStackConfig decode of StackConfigStatic preserves
+// Site.Domain through to the Input the Provision path reads — a
+// regression on the 5th exposure of the inline-tag asymmetry
+// (api/main's release pipeline, dist.simple-container.com, 2026-11-09).
+// Previously `decodeInputsAs` (yaml-roundtrip) lost Site because
+// SC-core's sender json.Marshal emits `"Site":{...}` NESTED (named
+// field, encoding/json ignores `,inline`) and yaml.v3's `,inline`
+// decoder can't flatten it. `decodeInputsAsJSON` reads the wire with
+// the same codec it was written in.
+func TestConvertStackConfig_StaticWebsiteDomainSurvivesRoundTrip(t *testing.T) {
+	RegisterTestingT(t)
+
+	// Build the wire exactly the way SC-core's PlainToInputs would —
+	// json.Marshal of a *StackConfigStatic puts Site NESTED as the
+	// NAMED field "Site":{...} (encoding/json does not honour
+	// `,inline`). Any test that puts Site's fields flat at the top
+	// level does NOT model the real wire and would have passed against
+	// the broken yaml-roundtrip.
+	stackConfig := &api.StackConfigStatic{
+		BundleDir: "./bundle",
+		Location:  "EUROPE-CENTRAL2",
+		Site: api.StaticSiteConfig{
+			Domain:        "dist.simple-container.com",
+			BaseDnsZone:   "simple-container.com",
+			IndexDocument: "index.html",
+			ErrorDocument: "404.html",
+		},
+	}
+	stackInputs := inputsFromStruct(t, stackConfig)
+	templateConfig := map[string]any{
+		"projectId":   "simple-container-api",
+		"credentials": `{"type":"service_account"}`,
+	}
+	templateInputs := inputsFromStruct(t, templateConfig)
+
+	p := &gcpPlugin{progress: scPlugin.NewPublisher(0)}
+	req := &scpluginv1.ConvertStackConfigRequest{
+		Header:         &scpluginv1.RequestHeader{StackName: "dist", Environment: "prod"},
+		TemplateType:   gcpApi.TemplateTypeStaticWebsite,
+		StackName:      "dist",
+		StackDir:       "/tmp",
+		TemplateConfig: templateInputs,
+		StackConfig:    stackInputs,
+	}
+	resp, err := p.ConvertStackConfig(context.Background(), req)
+	Expect(err).ToNot(HaveOccurred(),
+		"ConvertStackConfig for gcp-static-website must not fail when the client sends Site nested — this is the real wire shape")
+	Expect(resp).ToNot(BeNil())
+	Expect(resp.Input).ToNot(BeEmpty())
+	domainIV, ok := resp.Input["domain"]
+	Expect(ok).To(BeTrue(),
+		"response Input must carry the flat `domain` scalar populated by ToStaticSiteConfig")
+	Expect(domainIV.GetStringValue()).To(Equal("dist.simple-container.com"),
+		"empty domain on the wire makes the Provision path build a Record URN `::Record::-record`, which Cloudflare rejects with 9000 DNS-name-invalid (see api/main release run 42599182582)")
+}
+
+// inputsFromStruct mirrors what SC-core's PlainToInputs does: json.Marshal
+// the typed Go value, parse back to map[string]any, encode each leaf as
+// an InputValue. Modelling the wire this way means test shapes caught
+// by this regression match what a live deploy actually sends.
+func inputsFromStruct(t *testing.T, v any) map[string]*scpluginv1.InputValue {
+	t.Helper()
+	b, err := json.Marshal(v)
+	Expect(err).ToNot(HaveOccurred())
+	var raw map[string]any
+	Expect(json.Unmarshal(b, &raw)).To(Succeed())
+	out := map[string]*scpluginv1.InputValue{}
+	for k, val := range raw {
+		if iv := encodeInputValue(val); iv != nil {
+			out[k] = iv
+		}
+	}
+	return out
+}
+
+func encodeInputValue(v any) *scpluginv1.InputValue {
+	switch x := v.(type) {
+	case string:
+		return &scpluginv1.InputValue{Value: &scpluginv1.InputValue_StringValue{StringValue: x}}
+	case bool:
+		return &scpluginv1.InputValue{Value: &scpluginv1.InputValue_BoolValue{BoolValue: x}}
+	case float64:
+		return &scpluginv1.InputValue{Value: &scpluginv1.InputValue_DoubleValue{DoubleValue: x}}
+	case map[string]any:
+		fields := map[string]*scpluginv1.InputValue{}
+		for k, item := range x {
+			if iv := encodeInputValue(item); iv != nil {
+				fields[k] = iv
+			}
+		}
+		return &scpluginv1.InputValue{Value: &scpluginv1.InputValue_MapValue{MapValue: &scpluginv1.InputMap{Fields: fields}}}
+	case []any:
+		items := make([]*scpluginv1.InputValue, 0, len(x))
+		for _, item := range x {
+			iv := encodeInputValue(item)
+			if iv == nil {
+				iv = &scpluginv1.InputValue{}
+			}
+			items = append(items, iv)
+		}
+		return &scpluginv1.InputValue{Value: &scpluginv1.InputValue_ListValue{ListValue: &scpluginv1.InputList{Items: items}}}
+	}
+	return nil
 }

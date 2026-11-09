@@ -883,8 +883,16 @@ func (p *gcpPlugin) ConvertStackConfig(ctx context.Context, req *scpluginv1.Conv
 		}
 		typedInput, cerr = gcpApi.ToCloudRunConfig(tplCloudRun, composeCfg, stackCfg)
 	case gcpApi.TemplateTypeStaticWebsite:
+		// `StackConfigStatic.Site` is a NAMED field tagged
+		// `json:",inline" yaml:",inline"`. SC-core sender json.Marshals
+		// it as `"Site":{...}` nested (encoding/json ignores `,inline`);
+		// the default yaml-roundtrip decode on this side can't flatten
+		// it and leaves Site zero, which then empties the Domain mirror
+		// `ToStaticSiteConfig` populates — producing an empty Record
+		// URN on the Provision side. Use the JSON roundtrip so Site
+		// survives (5th exposure of the inline-tag asymmetry).
 		stackCfg := &api.StackConfigStatic{}
-		if err := decodeInputsAs(req.GetStackConfig(), stackCfg); err != nil {
+		if err := decodeInputsAsJSON(req.GetStackConfig(), stackCfg); err != nil {
 			return nil, errors.Wrap(err, "decode StackConfigStatic")
 		}
 		typedInput, cerr = gcpApi.ToStaticSiteConfig(tplCfg, stackDir, stackName, stackCfg)
@@ -1091,6 +1099,34 @@ func decodeInputsAs[T any](inputs map[string]*scpluginv1.InputValue, out *T) err
 		return err
 	}
 	return yaml.Unmarshal(b, out)
+}
+
+// decodeInputsAsJSON decodes bus inputs via a JSON round-trip — symmetric
+// with the SC-core sender (`PlainToInputs` calls `json.Marshal`). Use
+// this for structs whose nested embeds are `json:",inline"` on NAMED
+// fields (e.g. `api.StackConfigStatic.Site`). yaml.v3 flattens on
+// `,inline`; `encoding/json` ignores it and emits the Go field name as
+// a nested object key. The default yaml-roundtrip can then NOT flatten
+// the nested block (yaml.v3's `,inline` decoder expects fields FLAT at
+// the parent), so the named field stays zero. JSON honours the Go
+// field name on both ends and decodes the nested object correctly.
+//
+// Live-caught 2026-11-09 on api/main's release pipeline: #568's
+// dist.simple-container.com publish was planning a cloudflare Record
+// rename from `dist.simple-container.com-record` to `-record`
+// (name=""), 400 "DNS name is invalid" from CF, no live record
+// destroyed because create failed first. 5th exposure of the plugin-
+// bus inline-tag asymmetry — the Provision-side StaticSiteInput was
+// patched (#3) but the ConvertStackConfig-side StackConfigStatic decode
+// still lost Site.Domain, so ToStaticSiteConfig's mirror population
+// wrote "" into the Domain scalar the Provision path reads.
+func decodeInputsAsJSON[T any](inputs map[string]*scpluginv1.InputValue, out *T) error {
+	plain := scPlugin.InputsToPlain(inputs)
+	b, err := json.Marshal(plain)
+	if err != nil {
+		return err
+	}
+	return json.Unmarshal(b, out)
 }
 
 func main() {

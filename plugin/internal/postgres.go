@@ -52,7 +52,15 @@ func Postgres(ctx *sdk.Context, stack api.Stack, input api.ResourceInput, params
 	if err != nil {
 		return nil, errors.Wrapf(err, "failed to generate root postgres password")
 	}
-	ctx.Export(rootPasswordExport, rootPassword.Result)
+	// Wrap in sdk.ToSecret() so Pulumi state encrypts the root password +
+	// `sc stack outputs` masks it + cross-stack consumers via
+	// PluginResourceOutput see `secret: true`. Before 2026-11-12 this
+	// export was plaintext — pulumi-random marks `.Result` sensitive
+	// provider-side, but the SC plugin bus propagates the per-export
+	// secret flag, not the provider marker, so consumers saw
+	// `secret: false`. Forge roadmap item:
+	// sc-plugin-gcp-cloudsql-root-password-plaintext-export.
+	ctx.Export(rootPasswordExport, sdk.ToSecret(rootPassword.Result))
 
 	databaseFlags := toDatabaseFlagArray(configuredDatabaseFlags(pgCfg))
 

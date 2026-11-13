@@ -38,6 +38,8 @@ func TestSchema_AdvertisesCanonicalTokens(t *testing.T) {
 		gcpApi.ResourceTypePostgresGcpCloudsql,
 		gcpApi.ResourceTypeArtifactRegistry, gcpApi.ResourceTypeRemoteDockerImagePush,
 		gcpApi.ResourceTypeGkeAutopilot,
+		// The secrets-provider key is provisioned through Provision.
+		gcpApi.SecretsProviderTypeGcpKms,
 		// Template types fold in — see stackread.go:165-170.
 		gcpApi.TemplateTypeGcpCloudrun,
 		gcpApi.TemplateTypeStaticWebsite,
@@ -340,4 +342,63 @@ func encodeInputValue(v any) *scpluginv1.InputValue {
 		return &scpluginv1.InputValue{Value: &scpluginv1.InputValue_ListValue{ListValue: &scpluginv1.InputList{Items: items}}}
 	}
 	return nil
+}
+
+func strInputs(kv map[string]any) map[string]*scpluginv1.InputValue {
+	out := map[string]*scpluginv1.InputValue{}
+	for k, v := range kv {
+		switch x := v.(type) {
+		case string:
+			out[k] = &scpluginv1.InputValue{Value: &scpluginv1.InputValue_StringValue{StringValue: x}}
+		case bool:
+			out[k] = &scpluginv1.InputValue{Value: &scpluginv1.InputValue_BoolValue{BoolValue: x}}
+		}
+	}
+	return out
+}
+
+// With `provision: true` the key URL lives in the stack's `--sc` secrets
+// stack, which SC core reads itself. An empty response tells core to do that;
+// an error here stops every stack before the engine starts.
+func TestInitSecretsProvider_EmptyResponseLetsCoreResolveTheKey(t *testing.T) {
+	RegisterTestingT(t)
+	p := &gcpPlugin{progress: scPlugin.NewPublisher(0)}
+
+	for name, req := range map[string]*scpluginv1.InitSecretsProviderRequest{
+		"no config (cores that do not send it)": {SecretsProviderType: gcpApi.SecretsProviderTypeGcpKms},
+		"provision: true": {SecretsProviderType: gcpApi.SecretsProviderTypeGcpKms, Config: strInputs(map[string]any{
+			"provision": true, "keyName": "payspace-kms-key", "keyLocation": "global", "projectId": "p",
+		})},
+		"gcp-secrets-manager": {SecretsProviderType: gcpApi.SecretsTypeGCPSecretsManager},
+	} {
+		resp, err := p.InitSecretsProvider(context.Background(), req)
+		Expect(err).ToNot(HaveOccurred(), name)
+		Expect(resp.GetProviderUrl()).To(BeEmpty(), name)
+		Expect(resp.GetPassphrase()).To(BeEmpty(), name)
+		Expect(resp.GetEnv()).To(BeEmpty(), name)
+	}
+}
+
+func TestInitSecretsProvider_ByoKeyReturnsItsUrl(t *testing.T) {
+	RegisterTestingT(t)
+	p := &gcpPlugin{progress: scPlugin.NewPublisher(0)}
+	url := "gcpkms://projects/p/locations/global/keyRings/r/cryptoKeys/k"
+
+	resp, err := p.InitSecretsProvider(context.Background(), &scpluginv1.InitSecretsProviderRequest{
+		SecretsProviderType: gcpApi.SecretsProviderTypeGcpKms,
+		Config:              strInputs(map[string]any{"provision": false, "keyName": url}),
+	})
+	Expect(err).ToNot(HaveOccurred())
+	Expect(resp.GetProviderUrl()).To(Equal(url))
+}
+
+func TestInitStateStore_RequiresBucketName(t *testing.T) {
+	RegisterTestingT(t)
+	p := &gcpPlugin{progress: scPlugin.NewPublisher(0)}
+
+	_, err := p.InitStateStore(context.Background(), &scpluginv1.InitStateStoreRequest{
+		StateStoreType: gcpApi.StateStorageTypeGcpBucket,
+		Config:         strInputs(map[string]any{"projectId": "p"}),
+	})
+	Expect(err).To(MatchError(ContainSubstring("bucketName")))
 }

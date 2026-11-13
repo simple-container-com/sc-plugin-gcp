@@ -136,6 +136,10 @@ func (p *gcpPlugin) Schema(_ context.Context, _ *scpluginv1.SchemaRequest) (*scp
 			gcpApi.ResourceTypePostgresGcpCloudsql,
 			gcpApi.ResourceTypeArtifactRegistry, gcpApi.ResourceTypeRemoteDockerImagePush,
 			gcpApi.ResourceTypeGkeAutopilot,
+			// gcp-kms doubles as a resource: with `provision: true` SC core
+			// provisions the stack's secrets-provider key through the
+			// generic Provision RPC on the `--sc` secrets stack.
+			gcpApi.SecretsProviderTypeGcpKms,
 			// Template types fold into ResourceTypes (stackread.go:165-170
 			// — the parse-time distinction is drawn by WHERE server.yaml
 			// uses the type, not by Schema field). Routed to the plugin's
@@ -412,6 +416,29 @@ func (p *gcpPlugin) Provision(stdctx context.Context, req *scpluginv1.ProvisionR
 		if _, pserr := gcpInternal.PubSubTopics(rctx.Pulumi, stack, input, pApi.ProvisionParams{Log: logger.New(), Provider: provider}); pserr != nil {
 			p.progress.Error("provision", pserr.Error())
 			return nil, pserr
+		}
+
+	case gcpApi.SecretsProviderTypeGcpKms:
+		cfg := &gcpApi.SecretsProviderConfig{}
+		if derr := decodeInputsAs(req.GetInputs(), cfg); derr != nil {
+			return nil, errors.Wrap(derr, "decode SecretsProviderConfig from Provision inputs")
+		}
+		provider, perr := buildProvider(&cfg.Credentials)
+		if perr != nil {
+			p.progress.Error("provision", perr.Error())
+			return nil, perr
+		}
+		input := api.ResourceInput{
+			Descriptor: &api.ResourceDescriptor{
+				Type:   req.GetResourceType(),
+				Name:   req.GetResourceName(),
+				Config: api.Config{Config: cfg},
+			},
+			StackParams: stackParams,
+		}
+		if _, kerr := gcpInternal.KmsKeySecretsProvider(rctx.Pulumi, stack, input, pApi.ProvisionParams{Log: logger.New(), Provider: provider}); kerr != nil {
+			p.progress.Error("provision", kerr.Error())
+			return nil, kerr
 		}
 
 	case gcpApi.ResourceTypeRedis:
@@ -941,6 +968,59 @@ func (p *gcpPlugin) ConvertStackConfig(ctx context.Context, req *scpluginv1.Conv
 		}
 	}
 	return resp, nil
+}
+
+// InitStateStore — pre-engine. SC core calls this in login, before the
+// Pulumi backend is opened, for a `state-storage: {type: gcp-bucket}`
+// provisioner. The response carries the gs:// backend URL and the env core
+// must export for the engine and the processes it starts; with
+// `provision: true` the bucket is created or its state history bounded here.
+func (p *gcpPlugin) InitStateStore(ctx context.Context, req *scpluginv1.InitStateStoreRequest) (*scpluginv1.InitStateStoreResponse, error) {
+	cfg := &gcpApi.StateStorageConfig{}
+	if err := decodeInputsAs(req.GetConfig(), cfg); err != nil {
+		return nil, errors.Wrap(err, "decode StateStorageConfig")
+	}
+	if cfg.GetBucketName() == "" {
+		return nil, errors.New("gcp-bucket state storage requires bucketName")
+	}
+	p.progress.Info("state-store", fmt.Sprintf("configuring gcp-bucket backend (bucket=%q provision=%t)", cfg.GetBucketName(), cfg.IsProvisionEnabled()))
+
+	envVars, err := gcpInternal.InitStateStore(ctx, cfg, logger.New())
+	if err != nil {
+		p.progress.Error("state-store", err.Error())
+		return nil, err
+	}
+	env := make(map[string]*scpluginv1.InputValue, len(envVars))
+	for k, v := range envVars {
+		env[k] = &scpluginv1.InputValue{
+			Value:  &scpluginv1.InputValue_StringValue{StringValue: v},
+			Secret: k == "GOOGLE_CREDENTIALS",
+		}
+	}
+	return &scpluginv1.InitStateStoreResponse{BackendUrl: cfg.StorageUrl(), Env: env}, nil
+}
+
+// InitSecretsProvider — pre-engine. SC core calls this before login for a
+// provisioner whose secrets-provider type this plugin advertises.
+//
+// The request carries the secrets-provider config only on cores that send it;
+// older ones send none. With `provision: true`, or with no config at all, the
+// response is empty on purpose: core then resolves the gcpkms:// URL itself,
+// from the stack's `--sc` secrets stack (provisioning the key through the
+// Provision RPC the first time). With `provision: false` and a keyName, that
+// keyName is the full gcpkms:// URL and is returned as is.
+func (p *gcpPlugin) InitSecretsProvider(_ context.Context, req *scpluginv1.InitSecretsProviderRequest) (*scpluginv1.InitSecretsProviderResponse, error) {
+	if req.GetSecretsProviderType() != gcpApi.SecretsProviderTypeGcpKms || len(req.GetConfig()) == 0 {
+		return &scpluginv1.InitSecretsProviderResponse{}, nil
+	}
+	cfg := &gcpApi.SecretsProviderConfig{}
+	if err := decodeInputsAs(req.GetConfig(), cfg); err != nil {
+		return nil, errors.Wrap(err, "decode SecretsProviderConfig")
+	}
+	if cfg.IsProvisionEnabled() {
+		return &scpluginv1.InitSecretsProviderResponse{}, nil
+	}
+	return &scpluginv1.InitSecretsProviderResponse{ProviderUrl: cfg.KeyUrl()}, nil
 }
 
 func (p *gcpPlugin) PreDestroy(ctx context.Context, req *scpluginv1.PreDestroyRequest) (*scpluginv1.PreDestroyResponse, error) {

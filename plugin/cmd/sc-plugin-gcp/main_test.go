@@ -502,3 +502,37 @@ func TestDecodeTemplateInputs_CarriesHealthcheckDurations(t *testing.T) {
 	var viaYAML gcpApi.GkeAutopilotInput
 	Expect(decodeInputsAs(inputs, &viaYAML)).ToNot(Succeed(), "yaml.v3 rejects a numeric time.Duration")
 }
+
+// The image build reads stack.Client.Security to decide whether to scan, sign,
+// attach an SBOM and attest provenance. In a plugin it was always nil.
+func TestProvisionStack_CarriesTheClientSecurityConfig(t *testing.T) {
+	RegisterTestingT(t)
+
+	raw, err := (&api.ClientDescriptor{
+		Security:   &api.SecurityDescriptor{Enabled: true, Scan: &api.ScanDescriptor{Enabled: true}, Signing: &api.SigningDescriptor{Enabled: true, Keyless: true}},
+		ImageBuild: &api.ImageBuildDescriptor{ReuseExistingCommitTag: true},
+	}).PluginClientConfigJSON()
+	Expect(err).ToNot(HaveOccurred())
+
+	stack, err := provisionStack(&scpluginv1.ProvisionRequest{
+		Header:           &scpluginv1.RequestHeader{StackName: "landing--staging"},
+		ClientConfigJson: raw,
+	})
+	Expect(err).ToNot(HaveOccurred())
+	Expect(stack.Name).To(Equal("landing--staging"))
+	Expect(stack.Client.Security).ToNot(BeNil())
+	Expect(stack.Client.Security.Enabled).To(BeTrue())
+	Expect(stack.Client.Security.Signing.Keyless).To(BeTrue())
+	Expect(stack.Client.ReuseExistingCommitTagEnabled()).To(BeTrue())
+}
+
+func TestProvisionStack_OlderCoreSendsNoClientConfig(t *testing.T) {
+	RegisterTestingT(t)
+
+	stack, err := provisionStack(&scpluginv1.ProvisionRequest{Header: &scpluginv1.RequestHeader{StackName: "pay-space"}})
+	Expect(err).ToNot(HaveOccurred())
+	Expect(stack.Client.Security).To(BeNil())
+
+	_, err = provisionStack(&scpluginv1.ProvisionRequest{ClientConfigJson: []byte("{not json")})
+	Expect(err).To(MatchError(ContainSubstring("client config")))
+}

@@ -337,7 +337,10 @@ func (p *gcpPlugin) Provision(stdctx context.Context, req *scpluginv1.ProvisionR
 		return nil, errors.Wrap(perr, "decode ParentInfo from provision request")
 	}
 
-	stack := api.Stack{Name: req.GetHeader().GetStackName()}
+	stack, serr := provisionStack(req)
+	if serr != nil {
+		return nil, serr
+	}
 
 	// Shared across all resource types: decode the operator's config,
 	// build the GCP provider inline from the embedded Credentials
@@ -860,6 +863,21 @@ func (p *gcpPlugin) ComputeProcess(stdctx context.Context, req *scpluginv1.Compu
 	return resp, nil
 }
 
+// provisionStack builds the api.Stack a template body receives. A plugin gets
+// only a name on the request header, so stack.Client would be empty, and
+// everything the image build reads off it takes its zero value: no scan, no
+// signature, no SBOM, no provenance, and a deploy that stays green. Core sends
+// the part of the client descriptor the build reads (`security`, `imageBuild`)
+// in client_config_json; an older core sends none, which gives the zero
+// descriptor, the behaviour before the field existed.
+func provisionStack(req *scpluginv1.ProvisionRequest) (api.Stack, error) {
+	client, err := api.ClientDescriptorFromPluginConfig(req.GetClientConfigJson())
+	if err != nil {
+		return api.Stack{}, errors.Wrap(err, "decode client config from Provision request")
+	}
+	return api.Stack{Name: req.GetHeader().GetStackName(), Client: client}, nil
+}
+
 // provisionStackParams builds `input.StackParams` for a Provision request.
 //
 // StackName is the PARENT CLI name ("landing"), not the CHILD stack name
@@ -1266,12 +1284,12 @@ func decodeInputsAs[T any](inputs map[string]*scpluginv1.InputValue, out *T) err
 	return yaml.Unmarshal(b, out)
 }
 
-// decodeTemplateInputs decodes a deployment template's inputs. SC core serialises
-// the template config with encoding/json, so a time.Duration (a healthcheck
-// `interval`) arrives as a number of nanoseconds. yaml.v3 refuses a numeric
-// Duration however it is written ("3e+10", "30000000000"), so the YAML
-// round-trip fails every stack that declares a healthcheck interval. JSON reads
-// the number as nanoseconds, which is what core wrote.
+// decodeTemplateInputs decodes a deployment template's inputs. SC core
+// serialises the template config with encoding/json, so a time.Duration (a
+// healthcheck `interval`) arrives as a number of nanoseconds. yaml.v3 refuses
+// a numeric Duration, whatever its spelling ("3e+10", "30000000000"), so the
+// YAML round-trip fails every stack that declares a healthcheck interval. JSON
+// reads the number as nanoseconds, which is what core wrote.
 func decodeTemplateInputs[T any](inputs map[string]*scpluginv1.InputValue, out *T) error {
 	return decodeInputsAsJSON(inputs, out)
 }

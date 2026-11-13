@@ -540,7 +540,7 @@ func (p *gcpPlugin) Provision(stdctx context.Context, req *scpluginv1.ProvisionR
 		// A registrar bridge is optional (only for stacks with a
 		// `domain:` on the compose config).
 		cfg := &gcpApi.CloudRunInput{}
-		if derr := decodeInputsAs(req.GetInputs(), cfg); derr != nil {
+		if derr := decodeTemplateInputs(req.GetInputs(), cfg); derr != nil {
 			return nil, errors.Wrap(derr, "decode CloudRunInput from Provision inputs")
 		}
 		input := api.ResourceInput{
@@ -672,7 +672,7 @@ func (p *gcpPlugin) Provision(stdctx context.Context, req *scpluginv1.ProvisionR
 		// Registry) AND the registrar bridge for Caddy override-header
 		// rules.
 		cfg := &gcpApi.GkeAutopilotInput{}
-		if derr := decodeInputsAs(req.GetInputs(), cfg); derr != nil {
+		if derr := decodeTemplateInputs(req.GetInputs(), cfg); derr != nil {
 			return nil, errors.Wrap(derr, "decode GkeAutopilotInput from Provision inputs")
 		}
 		provider, perr := buildProvider(&cfg.GkeAutopilotTemplate.Credentials)
@@ -1264,6 +1264,16 @@ func decodeInputsAs[T any](inputs map[string]*scpluginv1.InputValue, out *T) err
 		return err
 	}
 	return yaml.Unmarshal(b, out)
+}
+
+// decodeTemplateInputs decodes a deployment template's inputs. SC core serialises
+// the template config with encoding/json, so a time.Duration (a healthcheck
+// `interval`) arrives as a number of nanoseconds. yaml.v3 refuses a numeric
+// Duration however it is written ("3e+10", "30000000000"), so the YAML
+// round-trip fails every stack that declares a healthcheck interval. JSON reads
+// the number as nanoseconds, which is what core wrote.
+func decodeTemplateInputs[T any](inputs map[string]*scpluginv1.InputValue, out *T) error {
+	return decodeInputsAsJSON(inputs, out)
 }
 
 // decodeInputsAsJSON decodes bus inputs via a JSON round-trip — symmetric

@@ -15,6 +15,7 @@ import (
 
 	. "github.com/onsi/gomega"
 	"github.com/simple-container-com/api/pkg/api"
+	pApi "github.com/simple-container-com/api/pkg/clouds/pulumi/api"
 	scPlugin "github.com/simple-container-com/api/pkg/plugin"
 	scpluginv1 "github.com/simple-container-com/api/pkg/plugin/proto/v1"
 
@@ -401,4 +402,69 @@ func TestInitStateStore_RequiresBucketName(t *testing.T) {
 		Config:         strInputs(map[string]any{"projectId": "p"}),
 	})
 	Expect(err).To(MatchError(ContainSubstring("bucketName")))
+}
+
+// A plan that deleted `landing` and created `landing-staging` for the
+// Namespace, Deployment, Service, VPA and PDB of a deployed stack: the
+// template names them off StackParams.StackName, and the plugin fed it the
+// child stack name. The Kubernetes provider shows it plainest: it must be
+// "<cli stack>--<env>", never "<child stack>--<env>".
+func TestProvisionStackParams_UsesTheCliStackName(t *testing.T) {
+	RegisterTestingT(t)
+
+	h := &scpluginv1.RequestHeader{StackName: "landing--staging", CliStackName: "landing", Environment: "staging"}
+	sp := provisionStackParams(h)
+	Expect(sp.StackName).To(Equal("landing"))
+	Expect(sp.Environment).To(Equal("staging"))
+
+	in := api.ResourceInput{StackParams: sp}
+	Expect(in.ToResName(sp.StackName)).To(Equal("landing--staging"), "the Kubernetes provider name of a deployed stack")
+}
+
+func TestProvisionStackParams_OlderCoresFallBackToTheStackName(t *testing.T) {
+	RegisterTestingT(t)
+
+	sp := provisionStackParams(&scpluginv1.RequestHeader{StackName: "pay-space", Environment: "production"})
+	Expect(sp.StackName).To(Equal("pay-space"))
+}
+
+// Core stopped building the provider of a plugin-owned `uses:` dependency, so
+// the plugin builds it. Its name is core's old initProvider formula; a
+// different name is a delete of the live provider and a create of a new one.
+func TestComputeProcessProviderName(t *testing.T) {
+	RegisterTestingT(t)
+
+	req := &scpluginv1.ComputeProcessRequest{
+		Header:       &scpluginv1.RequestHeader{StackName: "crypto-tools-worker--staging", Environment: "staging"},
+		ResourceType: gcpApi.ResourceTypePostgresGcpCloudsql,
+		ResourceName: "postgres",
+	}
+
+	name, env := computeProcessProviderName(req, nil)
+	Expect(name).To(Equal("crypto-tools-worker--staging--gcp-cloudsql-postgres--postgres--staging--provider"))
+	Expect(env).To(Equal("staging"))
+
+	// `uses: [postgres]` resolved through a dependsOn resource appends it to
+	// the resource name; a custom stack provisions in the parent's env.
+	name, env = computeProcessProviderName(req, &pApi.ParentInfo{
+		ParentEnv:         "production",
+		DependsOnResource: &api.StackConfigDependencyResource{Name: "main-db"},
+	})
+	Expect(name).To(Equal("crypto-tools-worker--staging--gcp-cloudsql-postgres--postgres--main-db--production--provider"))
+	Expect(env).To(Equal("production"))
+}
+
+func TestComputeProcessCredentials_EveryComputeProcessTypeHasOne(t *testing.T) {
+	RegisterTestingT(t)
+
+	for name, cfg := range map[string]any{
+		"bucket":   &gcpApi.GcpBucket{},
+		"pubsub":   &gcpApi.PubSubConfig{},
+		"redis":    &gcpApi.RedisConfig{},
+		"postgres": &gcpApi.PostgresGcpCloudsqlConfig{},
+		"gke":      &gcpApi.GkeAutopilotResource{},
+	} {
+		Expect(computeProcessCredentials(cfg)).ToNot(BeNil(), name)
+	}
+	Expect(computeProcessCredentials(&gcpApi.StateStorageConfig{})).To(BeNil())
 }

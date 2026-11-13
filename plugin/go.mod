@@ -1,6 +1,6 @@
 module github.com/simple-container-com/sc-plugin-gcp/plugin
 
-go 1.26.10
+go 1.26.11
 
 require (
 	cloud.google.com/go/storage v1.62.3
@@ -15,13 +15,14 @@ require (
 	github.com/pulumi/pulumi-random/sdk/v4 v4.21.0
 	github.com/pulumi/pulumi/sdk/v3 v3.245.0
 	github.com/samber/lo v1.53.0
-	github.com/simple-container-com/api v0.0.0-20261108125250-00968155a92f
+	github.com/simple-container-com/api v0.0.0-20261115103906-66c203c79890
 	github.com/simple-container-com/sc-plugin-gcp/api v0.0.0
 	github.com/spf13/afero v1.15.0
 	go.uber.org/atomic v1.11.0
 	golang.org/x/mod v0.41.0
 	golang.org/x/oauth2 v0.36.0
 	google.golang.org/api v0.284.0
+	google.golang.org/grpc v1.83.2
 	gopkg.in/yaml.v3 v3.0.1
 )
 
@@ -201,7 +202,6 @@ require (
 	google.golang.org/genproto v0.0.0-20260319201613-d00831a3d3e7 // indirect
 	google.golang.org/genproto/googleapis/api v0.0.0-20260803160001-6ac0973c030d // indirect
 	google.golang.org/genproto/googleapis/rpc v0.0.0-20260803160001-6ac0973c030d // indirect
-	google.golang.org/grpc v1.83.2 // indirect
 	google.golang.org/protobuf v1.36.12-0.20260120151049-f2248ac996af // indirect
 	gopkg.in/evanphx/json-patch.v4 v4.13.0 // indirect
 	gopkg.in/inf.v0 v0.9.1 // indirect

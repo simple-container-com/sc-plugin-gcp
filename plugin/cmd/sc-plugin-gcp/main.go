@@ -347,10 +347,7 @@ func (p *gcpPlugin) Provision(stdctx context.Context, req *scpluginv1.ProvisionR
 	// state continuity.
 	providerResName := fmt.Sprintf("%s--%s--%s--%s--provider",
 		stack.Name, req.GetResourceType(), req.GetResourceName(), req.GetHeader().GetEnvironment())
-	stackParams := &api.StackParams{
-		StackName:   stack.Name,
-		Environment: req.GetHeader().GetEnvironment(),
-	}
+	stackParams := provisionStackParams(req.GetHeader())
 
 	buildProvider := func(creds *gcpApi.Credentials) (sdk.ProviderResource, error) {
 		provOut, perr := gcpInternal.Provider(rctx.Pulumi, stack, api.ResourceInput{
@@ -836,13 +833,23 @@ func (p *gcpPlugin) ComputeProcess(stdctx context.Context, req *scpluginv1.Compu
 	}
 	input := runtime.ResourceInputForComputeProcess(req, parent, cfg)
 
+	// Core builds the cloud provider for a `uses:` dependency only for
+	// in-tree types; for a plugin-owned type it leaves params.Provider nil
+	// and the plugin has to build it, with core's own name so the provider
+	// URN stays byte-identical to stacks deployed before the split.
+	provider, perr := p.computeProcessProvider(rctx.Pulumi, req, parent, cfg)
+	if perr != nil {
+		p.progress.Error("compute-process", perr.Error())
+		return nil, perr
+	}
+
 	// Drain + marshal are OWNED by RunComputeProcess. A plugin author
 	// cannot forget to await captured outputs — toResponse and
 	// awaitOutputs are package-private in api/pkg/plugin/runtime.
 	resp, _, err = runtime.RunComputeProcess(
 		stdctx, rctx,
 		api.Stack{Name: req.GetHeader().GetStackName()}, input,
-		pApi.ProvisionParams{Log: logger.New(), ParentStack: parent},
+		pApi.ProvisionParams{Log: logger.New(), ParentStack: parent, Provider: provider},
 		processor,
 	)
 	if err != nil {
@@ -851,6 +858,84 @@ func (p *gcpPlugin) ComputeProcess(stdctx context.Context, req *scpluginv1.Compu
 	}
 	p.progress.Info("compute-process", fmt.Sprintf("emitted %d env var(s) + %d tpl extension(s)", len(resp.GetEnvVars()), len(resp.GetTplExtensions())))
 	return resp, nil
+}
+
+// provisionStackParams builds `input.StackParams` for a Provision request.
+//
+// StackName is the PARENT CLI name ("landing"), not the CHILD stack name
+// ("landing--staging") that `stack.Name` and the provider URN carry.
+// Templates name everything off it (namespace, Deployment, Service, the
+// Kubernetes provider), so the child name renames every live resource: a plan
+// that deletes `landing` and creates `landing-staging`. The in-tree path set
+// StackParams.StackName to the CLI value. Older SC cores send no
+// cli_stack_name; fall back to the child, which is at least non-empty.
+func provisionStackParams(h *scpluginv1.RequestHeader) *api.StackParams {
+	name := h.GetCliStackName()
+	if name == "" {
+		name = h.GetStackName()
+	}
+	return &api.StackParams{StackName: name, Environment: h.GetEnvironment()}
+}
+
+// computeProcessCredentials returns the credentials block of a resource config
+// decoded for ComputeProcess. Every GCP resource type embeds one.
+func computeProcessCredentials(cfg any) *gcpApi.Credentials {
+	switch c := cfg.(type) {
+	case *gcpApi.GcpBucket:
+		return &c.Credentials
+	case *gcpApi.PubSubConfig:
+		return &c.Credentials
+	case *gcpApi.RedisConfig:
+		return &c.Credentials
+	case *gcpApi.PostgresGcpCloudsqlConfig:
+		return &c.Credentials
+	case *gcpApi.GkeAutopilotResource:
+		return &c.Credentials
+	}
+	return nil
+}
+
+// computeProcessProviderName is the Pulumi name core gave the cloud provider of
+// a `uses:` dependency before the split (initProvider in core's provision.go):
+// "<child stack>--<type>--<resource>[--<dependsOn>]--<parent env>--provider",
+// to which the provider constructor appends "--<parent env>".
+func computeProcessProviderName(req *scpluginv1.ComputeProcessRequest, parent *pApi.ParentInfo) (name, env string) {
+	env = req.GetHeader().GetEnvironment()
+	resName := req.GetResourceName()
+	if parent != nil {
+		if parent.ParentEnv != "" {
+			env = parent.ParentEnv
+		}
+		if parent.DependsOnResource != nil {
+			resName += "--" + parent.DependsOnResource.Name
+		}
+	}
+	return fmt.Sprintf("%s--%s--%s--%s--provider", req.GetHeader().GetStackName(), req.GetResourceType(), resName, env), env
+}
+
+func (p *gcpPlugin) computeProcessProvider(ctx *sdk.Context, req *scpluginv1.ComputeProcessRequest, parent *pApi.ParentInfo, cfg any) (sdk.ProviderResource, error) {
+	creds := computeProcessCredentials(cfg)
+	if creds == nil {
+		return nil, errors.Errorf("no credentials on the %q config for ComputeProcess", req.GetResourceType())
+	}
+	name, env := computeProcessProviderName(req, parent)
+	stack := api.Stack{Name: req.GetHeader().GetStackName()}
+	out, err := gcpInternal.Provider(ctx, stack, api.ResourceInput{
+		Descriptor: &api.ResourceDescriptor{
+			Type:   gcpApi.ProviderType,
+			Name:   name,
+			Config: api.Config{Config: creds},
+		},
+		StackParams: &api.StackParams{StackName: stack.Name, Environment: env},
+	}, pApi.ProvisionParams{Log: logger.New()})
+	if err != nil {
+		return nil, errors.Wrap(err, "build gcp provider inside ComputeProcess")
+	}
+	provider, ok := out.Ref.(sdk.ProviderResource)
+	if !ok {
+		return nil, errors.Errorf("gcp Provider returned %T, not sdk.ProviderResource", out.Ref)
+	}
+	return provider, nil
 }
 
 // PreDestroy is called by SC core before Pulumi's destroy phase, with

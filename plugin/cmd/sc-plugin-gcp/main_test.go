@@ -10,11 +10,13 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"golang.org/x/mod/modfile"
 
 	. "github.com/onsi/gomega"
 	"github.com/simple-container-com/api/pkg/api"
+	"github.com/simple-container-com/api/pkg/clouds/k8s"
 	pApi "github.com/simple-container-com/api/pkg/clouds/pulumi/api"
 	scPlugin "github.com/simple-container-com/api/pkg/plugin"
 	scpluginv1 "github.com/simple-container-com/api/pkg/plugin/proto/v1"
@@ -467,4 +469,70 @@ func TestComputeProcessCredentials_EveryComputeProcessTypeHasOne(t *testing.T) {
 		Expect(computeProcessCredentials(cfg)).ToNot(BeNil(), name)
 	}
 	Expect(computeProcessCredentials(&gcpApi.StateStorageConfig{})).To(BeNil())
+}
+
+// A stack with a healthcheck (`support-bot`, `promo-bot`) failed at Provision:
+//
+//	decode GkeAutopilotInput from Provision inputs: yaml: unmarshal errors:
+//	  line 46: cannot unmarshal !!float `3e+10` into time.Duration
+//
+// SC core sends the template config as JSON, where a Duration is a number of
+// nanoseconds; yaml.v3 does not accept a numeric Duration at all.
+func TestDecodeTemplateInputs_CarriesHealthcheckDurations(t *testing.T) {
+	RegisterTestingT(t)
+
+	interval := 30 * time.Second
+	want := gcpApi.GkeAutopilotInput{Deployment: k8s.DeploymentConfig{
+		ReadinessProbe: &k8s.CloudRunProbe{Interval: &interval},
+		StartupProbe:   &k8s.CloudRunProbe{Interval: &interval},
+	}}
+	raw, err := json.Marshal(want)
+	Expect(err).ToNot(HaveOccurred())
+	var plain map[string]any
+	Expect(json.Unmarshal(raw, &plain)).To(Succeed())
+	inputs := scPlugin.PlainToInputs(plain)
+
+	var got gcpApi.GkeAutopilotInput
+	Expect(decodeTemplateInputs(inputs, &got)).To(Succeed())
+	Expect(got.Deployment.ReadinessProbe).ToNot(BeNil())
+	Expect(*got.Deployment.ReadinessProbe.Interval).To(Equal(30 * time.Second))
+	Expect(*got.Deployment.StartupProbe.Interval).To(Equal(30 * time.Second))
+
+	// The path this replaces: it cannot read the same inputs.
+	var viaYAML gcpApi.GkeAutopilotInput
+	Expect(decodeInputsAs(inputs, &viaYAML)).ToNot(Succeed(), "yaml.v3 rejects a numeric time.Duration")
+}
+
+// The image build reads stack.Client.Security to decide whether to scan, sign,
+// attach an SBOM and attest provenance. In a plugin it was always nil.
+func TestProvisionStack_CarriesTheClientSecurityConfig(t *testing.T) {
+	RegisterTestingT(t)
+
+	raw, err := (&api.ClientDescriptor{
+		Security:   &api.SecurityDescriptor{Enabled: true, Scan: &api.ScanDescriptor{Enabled: true}, Signing: &api.SigningDescriptor{Enabled: true, Keyless: true}},
+		ImageBuild: &api.ImageBuildDescriptor{ReuseExistingCommitTag: true},
+	}).PluginClientConfigJSON()
+	Expect(err).ToNot(HaveOccurred())
+
+	stack, err := provisionStack(&scpluginv1.ProvisionRequest{
+		Header:           &scpluginv1.RequestHeader{StackName: "landing--staging"},
+		ClientConfigJson: raw,
+	})
+	Expect(err).ToNot(HaveOccurred())
+	Expect(stack.Name).To(Equal("landing--staging"))
+	Expect(stack.Client.Security).ToNot(BeNil())
+	Expect(stack.Client.Security.Enabled).To(BeTrue())
+	Expect(stack.Client.Security.Signing.Keyless).To(BeTrue())
+	Expect(stack.Client.ReuseExistingCommitTagEnabled()).To(BeTrue())
+}
+
+func TestProvisionStack_OlderCoreSendsNoClientConfig(t *testing.T) {
+	RegisterTestingT(t)
+
+	stack, err := provisionStack(&scpluginv1.ProvisionRequest{Header: &scpluginv1.RequestHeader{StackName: "pay-space"}})
+	Expect(err).ToNot(HaveOccurred())
+	Expect(stack.Client.Security).To(BeNil())
+
+	_, err = provisionStack(&scpluginv1.ProvisionRequest{ClientConfigJson: []byte("{not json")})
+	Expect(err).To(MatchError(ContainSubstring("client config")))
 }

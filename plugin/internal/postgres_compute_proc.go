@@ -301,10 +301,43 @@ func createCloudsqlProxy(ctx *sdk.Context, params appendParams, namespaceOutput 
 	return cloudsqlProxy, nil
 }
 
+// dependencyDatabaseName is the database a `dependencies:` consumer connects
+// to: the owner stack's database in the CONSUMER's environment.
+//
+// The plugin runtime hands compute processors the parent's environment in
+// StackParams.Environment, so that lookups of the parent's exports resolve.
+// The database is not a parent export: an owner in env "tenant-a" under
+// parentEnv "production" owns "<owner>--tenant-a". Naming it after the parent
+// env points the consumer at "<owner>--production", another tenant's data.
+// ParentInfo.StackEnv carries the consumer's own environment across the bus.
+func dependencyDatabaseName(ownerStackName string, input api.ResourceInput, parent *pApi.ParentInfo) (string, error) {
+	env := ""
+	if input.StackParams != nil {
+		env = input.StackParams.Environment
+	}
+	if parent != nil {
+		switch {
+		case parent.StackEnv != "":
+			env = parent.StackEnv
+		case parent.ParentEnv != "":
+			// Environment is the parent's here; guessing would name the
+			// parent env's database.
+			return "", errors.Errorf("cannot name the database of %q: the consumer's environment (ParentInfo.StackEnv) is missing", ownerStackName)
+		}
+	}
+	if env == "" {
+		return "", errors.Errorf("cannot name the database of %q: no environment", ownerStackName)
+	}
+	return pApi.StackNameInEnv(ownerStackName, env), nil
+}
+
 func appendDependsOnPostgresResourceContext(ctx *sdk.Context, params appendParams) error {
 	ownerStackName := pApi.CollapseStackReference(params.dependency.Owner)
 	userName := fmt.Sprintf("%s--%s", params.stack.Name, params.dependency.Name)
-	dbName := pApi.StackNameInEnv(ownerStackName, params.input.StackParams.Environment)
+	dbName, err := dependencyDatabaseName(ownerStackName, params.input, params.provisionParams.ParentStack)
+	if err != nil {
+		return err
+	}
 
 	password, err := createUserForDatabase(ctx, userName, dbName, params)
 	if err != nil {

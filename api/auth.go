@@ -202,7 +202,64 @@ func (r *Credentials) ProjectIdValue() string {
 }
 
 func (r *Credentials) CredentialsValue() string {
-	return r.Credentials.Credentials // just return serialized gcp account json
+	return unwrapAmbientCredentials(r.Credentials.Credentials) // serialized gcp account json, or "" for ambient
+}
+
+// unwrapAmbientCredentials maps the form SC core gives an auth block with an
+// empty key back to an empty value.
+//
+// A core binary that links no plugin module holds the auth block as an opaque
+// map and resolves `${auth:<name>}` to the block itself when its `credentials`
+// is empty: `{"credentials":"","projectId":"p"}`. That document is not a key.
+// It says "no key", which here means ambient credentials, exactly as an empty
+// string does.
+//
+// Only that exact envelope is recognised: one `credentials` member holding
+// the empty string, plus at most a string `projectId` and a string
+// `serviceAccount`. Any other member, a repeated member, a null or a
+// non-string value leaves the input unchanged, so a mistyped or half-filled
+// block still fails as a bad key instead of deploying as the runner.
+func unwrapAmbientCredentials(value string) string {
+	trimmed := strings.TrimSpace(value)
+	if !strings.HasPrefix(trimmed, "{") {
+		return value
+	}
+	dec := json.NewDecoder(strings.NewReader(trimmed))
+	if tok, err := dec.Token(); err != nil || tok != json.Delim('{') {
+		return value
+	}
+	seen := map[string]bool{}
+	for dec.More() {
+		tok, err := dec.Token()
+		if err != nil {
+			return value
+		}
+		name, ok := tok.(string)
+		if !ok || seen[name] {
+			return value
+		}
+		seen[name] = true
+		var member *string
+		if err := dec.Decode(&member); err != nil || member == nil {
+			return value // not a string, or null
+		}
+		switch name {
+		case "credentials":
+			if *member != "" {
+				return value
+			}
+		case "projectId", "serviceAccount":
+		default:
+			return value
+		}
+	}
+	if tok, err := dec.Token(); err != nil || tok != json.Delim('}') {
+		return value
+	}
+	if dec.More() || !seen["credentials"] {
+		return value
+	}
+	return ""
 }
 
 // UsesAmbientCredentials reports whether no service-account key is configured, in
